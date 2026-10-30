@@ -2,6 +2,7 @@ import sharp from "sharp";
 import assert from "assert";
 import { BufferBuilder } from "./BufferBuilder.js"
 
+const IMAGE_SIGNATURE = 0x35363552;     // "R565" little endian
 const IMAGE_FORMAT_RLE = 1;
 const IMAGE_FORMAT_BUFFER = 2;
 const DRAW_FLAGS_ALPHA_PIXELS = 0x01;
@@ -358,6 +359,7 @@ export async function packRle(image, options)
     let bb = new BufferBuilder();
 
     // Write header
+    bb.writeUInt32(IMAGE_SIGNATURE);
     bb.writeUInt32(IMAGE_FORMAT_RLE);
     bb.writeUInt32(image.info.width);
     bb.writeUInt32(image.info.height);

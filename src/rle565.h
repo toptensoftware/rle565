@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -7,8 +8,11 @@
 extern "C" {
 #endif
 
+// Signature at the start of every image: the bytes "R565" (little endian)
+#define IMAGE_SIGNATURE                    0x35363552
+
 // Base image format
-#define IMAGE_FORMAT_RLE                   1     // Run length encoded
+#define IMAGE_FORMAT_RLE                  1     // Run length encoded
 #define IMAGE_FORMAT_BUFFER                2     // Flat buffer
 
 // Flags used to select appropriately optimized drawing function
@@ -41,6 +45,7 @@ struct PALETTE
 
 struct IMAGE
 {
+    uint32_t signature;             // IMAGE_SIGNATURE ("R565")
     uint32_t format;
     uint32_t width;
     uint32_t height;
@@ -107,6 +112,29 @@ uint32_t get_image_height(const void* image);
 // Drawing
 void draw_image(IMAGE_BUFFER* buffer, const void* image, int32_t dest_x, int32_t dest_y, int32_t src_x, int32_t src_y, uint32_t width, uint32_t height, void* cap, uint8_t alpha, const PALETTE* palette);
 void restore_image(IMAGE_BUFFER* buffer, const void* capture);
+
+// Validation
+// Check that image_size bytes at image hold a well formed RLE image header:
+// signature, format, row table and (if present) palette all fit, and the
+// stored rows are within the image.  Doesn't validate the row data itself.
+// Use before trusting anything read from an untrusted file.
+bool check_image_header(const void* image, size_t image_size);
+
+// Decoding
+// Decode an entire image to 32-bit 0xAARRGGBB pixels (BGRA byte order in
+// memory, as used by WIC's 32bppBGRA / 32bppPBGRA formats).  Not composited
+// and not optimized - intended for previews and tooling.
+//
+//   image_size     size of the image data in bytes; everything read is
+//                  bounds checked against it so corrupt files fail safely
+//   palette        palette to use, or NULL for the image's own palette
+//   out            receives width x height pixels
+//   stride         output row stride in pixels (0 = image width)
+//   premultiplied  true for premultiplied alpha output, false for straight
+//
+// Returns false if the image data is invalid (out may be partially written).
+// Calls check_image_header() itself.
+bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* palette, uint32_t* out, uint32_t stride, bool premultiplied);
 
 // Initialize a buffered image
 void init_image_buffer(IMAGE_BUFFER* buffer, uint32_t width, uint32_t height, uint16_t* mem, uint32_t stride);

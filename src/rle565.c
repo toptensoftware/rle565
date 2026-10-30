@@ -180,6 +180,7 @@ uint32_t get_image_height(const void* image)
 
 void init_image_buffer(IMAGE_BUFFER* buffer, uint32_t width, uint32_t height, uint16_t* mem, uint32_t stride)
 {
+    buffer->base.signature = IMAGE_SIGNATURE;
     buffer->base.format = IMAGE_FORMAT_BUFFER;
     buffer->base.width = width;
     buffer->base.height = height;
@@ -193,6 +194,7 @@ void clip_image_buffer(IMAGE_BUFFER* buffer, IMAGE_BUFFER* underlying, uint32_t 
     assert(x + width <= underlying->base.width);
     assert(y + height <= underlying->base.height);
 
+    buffer->base.signature = IMAGE_SIGNATURE;
     buffer->base.format = IMAGE_FORMAT_BUFFER;
     buffer->buffer = underlying->buffer + y * underlying->stride + x;
     buffer->stride = underlying->stride;
@@ -307,6 +309,7 @@ void restore_image(IMAGE_BUFFER* dest_buffer, const void* capture)
 void draw_image(IMAGE_BUFFER* dest_buffer, const void* image, int32_t dest_x, int32_t dest_y, int32_t src_x, int32_t src_y, uint32_t width, uint32_t height, void* cap, uint8_t alpha, const PALETTE* palette)
 {
     const IMAGE_RLE* header = (const IMAGE_RLE*)image;
+    assert(header->base.signature == IMAGE_SIGNATURE);
     assert(header->base.format == IMAGE_FORMAT_RLE);
 
     // Images packed against a shared palette don't carry their own
@@ -484,4 +487,202 @@ void recolor_palette(PALETTE* palette, uint32_t colorA, uint32_t colorB, int cha
     }
 
     prepare_palette(palette);
+}
+
+
+// ---- Decoding ----
+
+// Bounds checked byte reader used by the decoder
+typedef struct
+{
+    const uint8_t* p;
+    const uint8_t* end;
+    bool ok;
+} SAFEREADER;
+
+static uint32_t safe_read_byte(SAFEREADER* r)
+{
+    if (r->p >= r->end)
+    {
+        r->ok = false;
+        return 0;
+    }
+    return *r->p++;
+}
+
+static uint32_t safe_read_varlen(SAFEREADER* r)
+{
+    uint32_t val = 0;
+    for (int i = 0; i < 5; i++)
+    {
+        uint32_t b = safe_read_byte(r);
+        val = (val << 7) | (b & 0x7F);
+        if ((b & 0x80) == 0)
+            return val;
+    }
+
+    // More than 5 bytes can't be a valid 32-bit value
+    r->ok = false;
+    return 0;
+}
+
+// Convert a prepared palette entry to 0xAARRGGBB
+static uint32_t palette_entry_to_argb8888(uint32_t c, bool premultiplied)
+{
+    uint32_t a = c >> 24;
+
+    // Fully transparent
+    if (a == 0)
+        return 0;
+
+    // Opaque entries are 0xFF00 + RGB565.  Expand with bit replication
+    // so full intensity maps to 0xFF.
+    if (a == 0xFF)
+    {
+        uint32_t r = (c >> 11) & 0x1F;
+        uint32_t g = (c >> 5) & 0x3F;
+        uint32_t b = c & 0x1F;
+        r = (r << 3) | (r >> 2);
+        g = (g << 2) | (g >> 4);
+        b = (b << 3) | (b >> 2);
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    // Partially transparent entries are already premultiplied ARGB8888
+    if (premultiplied)
+        return c;
+
+    uint32_t r = (((c >> 16) & 0xFF) * 255 + a / 2) / a;
+    uint32_t g = (((c >> 8) & 0xFF) * 255 + a / 2) / a;
+    uint32_t b = ((c & 0xFF) * 255 + a / 2) / a;
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+bool check_image_header(const void* image, size_t image_size)
+{
+    const IMAGE_RLE* header = (const IMAGE_RLE*)image;
+
+    if (image == nullptr || image_size < sizeof(IMAGE_RLE))
+        return false;
+    if (header->base.signature != IMAGE_SIGNATURE)
+        return false;
+    if (header->base.format != IMAGE_FORMAT_RLE)
+        return false;
+
+    // Packed size covers the whole image and must be available
+    uint64_t size = header->packedSize;
+    if (size < sizeof(IMAGE_RLE) || size > image_size)
+        return false;
+
+    // Stored rows within the image, row table within the data
+    if ((uint64_t)header->firstRow + header->rowCount > header->base.height)
+        return false;
+    if (sizeof(IMAGE_RLE) + (uint64_t)header->rowCount * sizeof(uint32_t) > size)
+        return false;
+
+    // Embedded palette (optional) within the data
+    if (header->paletteOffset != 0)
+    {
+        uint64_t offset = header->paletteOffset;
+        if (offset + sizeof(PALETTE) > size)
+            return false;
+        const PALETTE* palette = (const PALETTE*)((const uint8_t*)image + offset);
+        if (offset + sizeof(PALETTE) + (uint64_t)palette->count * sizeof(uint32_t) > size)
+            return false;
+    }
+
+    return true;
+}
+
+bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* palette, uint32_t* out, uint32_t stride, bool premultiplied)
+{
+    const uint8_t* base = (const uint8_t*)image;
+    const IMAGE_RLE* header = (const IMAGE_RLE*)image;
+
+    // Validate header
+    if (out == nullptr || !check_image_header(image, image_size))
+        return false;
+
+    // Only read within the image itself (image_size may cover more)
+    image_size = header->packedSize;
+
+    uint32_t width = header->base.width;
+    uint32_t height = header->base.height;
+    if (stride == 0)
+        stride = width;
+    if (stride < width)
+        return false;
+
+    // Use the image's own palette (already validated) if none supplied
+    if (palette == nullptr)
+    {
+        if (header->paletteOffset == 0)
+            return false;
+        palette = (const PALETTE*)(base + header->paletteOffset);
+    }
+
+    bool alphaPixels = (header->base.flags & DRAW_FLAGS_ALPHA_PIXELS) != 0;
+    bool largePalette = (header->base.flags & DRAW_FLAGS_LARGE_PALETTE) != 0;
+    const uint32_t* rowOffsets = (const uint32_t*)(base + sizeof(IMAGE_RLE));
+
+    for (uint32_t y = 0; y < height; y++)
+    {
+        uint32_t* row = out + (size_t)y * stride;
+
+        // Rows outside the stored range are fully transparent
+        if (y < header->firstRow || y >= header->firstRow + header->rowCount)
+        {
+            memset(row, 0, width * sizeof(uint32_t));
+            continue;
+        }
+
+        uint32_t rowOffset = rowOffsets[y - header->firstRow];
+        if (rowOffset >= image_size)
+            return false;
+
+        SAFEREADER r = { base + rowOffset, base + image_size, true };
+        uint32_t runCount = safe_read_varlen(&r);
+        uint32_t x = 0;
+
+        for (uint32_t ri = 0; ri < runCount && r.ok; ri++)
+        {
+            uint32_t pixCount = safe_read_varlen(&r);
+            bool is_rle = pixCount & 1;
+            pixCount >>= 1;
+            if (!is_rle && alphaPixels)
+                pixCount >>= 1;     // drop the alpha-run bit
+
+            if (pixCount > width - x)
+                return false;
+
+            for (uint32_t i = 0; i < pixCount; i++)
+            {
+                // RLE runs have one index, flat runs one per pixel
+                if (i == 0 || !is_rle)
+                {
+                    uint32_t pi = largePalette ? safe_read_varlen(&r) : safe_read_byte(&r);
+                    if (!r.ok || pi >= palette->count)
+                        return false;
+                    row[x] = palette_entry_to_argb8888(palette->colors[pi], premultiplied);
+                }
+                else
+                {
+                    row[x] = row[x - 1];
+                }
+                x++;
+            }
+        }
+
+        if (!r.ok)
+            return false;
+
+        // Treat anything not covered by runs as transparent
+        while (x < width)
+            row[x++] = 0;
+    }
+
+    return true;
 }

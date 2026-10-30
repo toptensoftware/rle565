@@ -54,7 +54,7 @@ void write_bmp(const char *filename, uint16_t *pixels, int w, int h) {
     fclose(f);
 }
 
-void* read_bin(const char* filename)
+void* read_bin(const char* filename, size_t* psize = NULL)
 {
     FILE* file = fopen(filename, "rb");
     if (!file) {
@@ -67,6 +67,8 @@ void* read_bin(const char* filename)
     void* img = malloc(size);
     fread(img, size, 1, file);
     fclose(file);
+    if (psize)
+        *psize = size;
     return img;
 }
 
@@ -267,6 +269,153 @@ int main()
         free(capbuf);
         free(mem);
         free(copy);
+    }
+
+    // 18: Decoding to ARGB8888 matches draw_image over black, and straight
+    //     alpha output is written out for comparison against the PNGs
+    {
+        const char* names[] = { "grey-gradient", "square", "transparent-square", "circles", "red-circle" };
+        for (const char* name : names)
+        {
+            char path[256];
+            snprintf(path, sizeof(path), "./artwork/%s.bin", name);
+            size_t size;
+            void* img = read_bin(path, &size);
+            uint32_t w = get_image_width(img);
+            uint32_t h = get_image_height(img);
+
+            // Reference: draw over black
+            uint16_t* ref = (uint16_t*)calloc(w * h, sizeof(uint16_t));
+            IMAGE_BUFFER refbuf;
+            init_image_buffer(&refbuf, w, h, ref, w);
+            draw_image(&refbuf, img, 0, 0, 0, 0, w, h, NULL, 0xFF, NULL);
+
+            // Premultiplied decode, reduced to 565, should match exactly
+            uint32_t* dec = (uint32_t*)malloc(w * h * sizeof(uint32_t));
+            bool ok = decode_image_argb8888(img, size, NULL, dec, 0, true);
+            bool match = ok;
+            for (uint32_t i = 0; ok && i < w * h; i++)
+            {
+                uint32_t c = dec[i];
+                uint16_t px = (uint16_t)((((c >> 16) & 0xFF) >> 3) << 11 | (((c >> 8) & 0xFF) >> 2) << 5 | ((c & 0xFF) >> 3));
+                if (px != ref[i])
+                    match = false;
+            }
+            char msg[128];
+            snprintf(msg, sizeof(msg), "18: decode %s matches draw_image", name);
+            check(match, msg);
+
+            // Straight alpha decode, saved as raw BGRA for inspection
+            ok = decode_image_argb8888(img, size, NULL, dec, 0, false);
+            snprintf(msg, sizeof(msg), "18: decode %s straight alpha", name);
+            check(ok, msg);
+            snprintf(path, sizeof(path), "build/%s.argb", name);
+            FILE* f = fopen(path, "wb");
+            fwrite(dec, sizeof(uint32_t), w * h, f);
+            fclose(f);
+
+            // Stride larger than width
+            uint32_t* wide = (uint32_t*)malloc((w + 7) * h * sizeof(uint32_t));
+            ok = decode_image_argb8888(img, size, NULL, wide, w + 7, false);
+            bool strideOk = ok;
+            for (uint32_t y = 0; ok && y < h; y++)
+                if (memcmp(wide + y * (w + 7), dec + y * w, w * sizeof(uint32_t)) != 0)
+                    strideOk = false;
+            snprintf(msg, sizeof(msg), "18: decode %s with stride", name);
+            check(strideOk, msg);
+
+            free(wide);
+            free(dec);
+            free(ref);
+            free(img);
+        }
+    }
+
+    // 19: Truncated and corrupted data must fail cleanly (no crash)
+    {
+        size_t size;
+        void* orig = read_bin("./artwork/circles.bin", &size);
+        uint32_t w = get_image_width(orig);
+        uint32_t h = get_image_height(orig);
+        uint32_t* dec = (uint32_t*)malloc(w * h * sizeof(uint32_t));
+
+        bool truncOk = true;
+        for (size_t len = 0; len < size; len++)
+        {
+            // Exact-size copy so any overread runs off the allocation
+            uint8_t* copy = (uint8_t*)malloc(len ? len : 1);
+            memcpy(copy, orig, len);
+            if (len < sizeof(IMAGE_RLE) && decode_image_argb8888(copy, len, NULL, dec, 0, true))
+                truncOk = false;
+            else if (len >= sizeof(IMAGE_RLE))
+                decode_image_argb8888(copy, len, NULL, dec, 0, true);
+            free(copy);
+        }
+        check(truncOk && !decode_image_argb8888(orig, size - 1, NULL, dec, 0, true), "19: truncated data fails cleanly");
+
+        uint8_t* copy = (uint8_t*)malloc(size);
+        srand(1234);
+        int rejected = 0;
+        for (int iter = 0; iter < 20000; iter++)
+        {
+            memcpy(copy, orig, size);
+            int flips = 1 + rand() % 8;
+            for (int i = 0; i < flips; i++)
+                copy[((size_t)rand() * RAND_MAX + rand()) % size] = (uint8_t)rand();
+
+            // Keep dimensions sane so the output buffer is big enough
+            ((IMAGE*)copy)->width = w;
+            ((IMAGE*)copy)->height = h;
+            if (!decode_image_argb8888(copy, size, NULL, dec, 0, rand() & 1))
+                rejected++;
+        }
+        printf("      (corruption: %d of 20000 rejected)\n", rejected);
+        check(true, "19: corrupted data doesn't crash");
+        free(copy);
+        free(dec);
+        free(orig);
+    }
+
+    // 20: Header checks
+    {
+        size_t size;
+        uint8_t* orig = (uint8_t*)read_bin("./artwork/red-circle.bin", &size);
+        uint8_t* copy = (uint8_t*)malloc(size + 100);
+        uint32_t* dec = (uint32_t*)malloc(300 * 300 * sizeof(uint32_t));
+
+        check(check_image_header(orig, size), "20: valid header accepted");
+        check(memcmp(orig, "R565", 4) == 0, "20: file starts with R565");
+
+        memcpy(copy, orig, size);
+        copy[0] = 'X';
+        check(!check_image_header(copy, size), "20: bad signature rejected");
+        check(!decode_image_argb8888(copy, size, NULL, dec, 0, true), "20: decode rejects bad signature");
+
+        memcpy(copy, orig, size);
+        ((IMAGE*)copy)->format = IMAGE_FORMAT_BUFFER;
+        check(!check_image_header(copy, size), "20: wrong format rejected");
+
+        memcpy(copy, orig, size);
+        ((IMAGE_RLE*)copy)->packedSize = (uint32_t)size + 1;
+        check(!check_image_header(copy, size), "20: packedSize beyond data rejected");
+
+        memcpy(copy, orig, size);
+        ((IMAGE_RLE*)copy)->paletteOffset = (uint32_t)size - 2;
+        check(!check_image_header(copy, size), "20: palette beyond data rejected");
+
+        memcpy(copy, orig, size);
+        ((IMAGE_RLE*)copy)->firstRow = 10;   // 10 + 292 rows > 300 high
+        check(!check_image_header(copy, size), "20: rows beyond height rejected");
+
+        // Trailing data (eg: image inside a blob pack) is fine
+        memcpy(copy, orig, size);
+        memset(copy + size, 0xEE, 100);
+        check(check_image_header(copy, size + 100) && decode_image_argb8888(copy, size + 100, NULL, dec, 0, true),
+              "20: trailing data accepted");
+
+        free(dec);
+        free(copy);
+        free(orig);
     }
 
     printf(failures ? "\n%d FAILED\n" : "\nAll checks passed\n", failures);
