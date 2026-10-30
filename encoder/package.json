@@ -1,9 +1,9 @@
 {
   "name": "rle565",
   "version": "1.0.0",
-  "description": "",
-  "license": "ISC",
-  "author": "",
+  "description": "Encoder, decoder and CLI for rle565 run length encoded RGB565 images",
+  "license": "MIT",
+  "author": "Topten Software",
   "type": "module",
   "main": "pack.js",
   "bin": {
