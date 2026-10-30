@@ -9,7 +9,7 @@ export const DRAW_FLAGS_ALPHA_PIXELS = 0x01;
 export const DRAW_FLAGS_LARGE_PALETTE = 0x02;
 
 
-// Quantize a PNG's RGB channels to 565-bit precision
+// Quantize a PNG's RGB channels to RGB565 precision (5/6/5 bits)
 export async function quantizePngTo565(filename)
 {
     const image = await sharp(filename)
@@ -20,7 +20,7 @@ export async function quantizePngTo565(filename)
     for (let i = 0; i < image.data.length; i += 4)
     {
         image.data[i]   &= 0xF8;  // R
-        image.data[i+1] &= 0xF8;  // G
+        image.data[i+1] &= 0xFC;  // G (6 bits)
         image.data[i+2] &= 0xF8;  // B
         // alpha unchanged
     }
@@ -54,7 +54,7 @@ export function packPalette(palette)
 
 
 // Helper to read a pixel.
-// Fully opaque pixels: returns 0xFF in the high byte + 5-bit packed RGB in the low 16 bits.
+// Fully opaque pixels: returns 0xFF in the high byte + RGB565 in the low 16 bits.
 // Partially transparent pixels: returns full 8-bit RGBA (a<<24 | r<<16 | g<<8 | b).
 // Fully transparent pixels: returns 0.
 function readPixel(image, x, y)

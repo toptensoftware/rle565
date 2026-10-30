@@ -22,9 +22,11 @@ extern "C" {
 #define DRAW_FLAGS_XCLIP            0x08        // Needs clipping in x-direction
 #define DRAW_FLAGS_CAPTURE          0x10        // Capture pixels as drawn
 
-// Helpers to pack/unpack rgb565 <-> rgb888
-#define rgb565_to_rgb888(x) (((x & 0xF800) << 8) | ((x & 0x07E0) << 5) |  ((x & 0x001F) << 3))
-#define rgb888_to_rgb565(x) (((x & 0xF80000) >> 8) | ((x & 0xFC00) >> 5) | ((x & 0xF8) >> 3))
+// Helpers to pack/unpack rgb565 <-> rgb888 (other bits of x are ignored).
+// Unpacking replicates the top bits into the low bits so full intensity maps
+// to 0xFF; packing truncates, so pack(unpack(x)) == x.
+#define rgb565_to_rgb888(x) ( (((x) & 0xF800) << 8) | (((x) & 0xE000) << 3)                             | (((x) & 0x07E0) << 5) | (((x) & 0x0600) >> 1)                             | (((x) & 0x001F) << 3) | (((x) & 0x001C) >> 2) )
+#define rgb888_to_rgb565(x) ( (((x) & 0xF80000) >> 8) | (((x) & 0xFC00) >> 5) | (((x) & 0xF8) >> 3) )
 
 // Helpers to premultiply/unpremultiply alpha for ARGB8888 colors
 uint32_t unpremultiply_argb8888(uint32_t c);

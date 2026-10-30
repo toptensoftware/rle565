@@ -11,59 +11,62 @@
 #endif
 
 
+// Divide by 255, rounding to nearest.  Exact for 0 <= x <= 255 * 255.
+static inline uint32_t div255(uint32_t x)
+{
+    x += 128;
+    return (x + (x >> 8)) >> 8;
+}
+
+// Expand 5 and 6 bit channels to 8 bits by bit replication, so full
+// intensity maps to 255 (not 248/252)
+static inline uint32_t expand5(uint32_t c) { return (c << 3) | (c >> 2); }
+static inline uint32_t expand6(uint32_t c) { return (c << 2) | (c >> 4); }
+
+// Blend a premultiplied 8 bit color (alpha a) over an RGB565 background and
+// round the result to RGB565
+static inline uint16_t blend_premul_over_rgb565(uint16_t bg, uint32_t fg_r, uint32_t fg_g, uint32_t fg_b, uint32_t a)
+{
+    uint32_t inv_a = 255 - a;
+
+    uint32_t r = fg_r + div255(expand5((bg >> 11) & 0x1F) * inv_a);
+    uint32_t g = fg_g + div255(expand6((bg >> 5)  & 0x3F) * inv_a);
+    uint32_t b = fg_b + div255(expand5( bg        & 0x1F) * inv_a);
+
+    return (uint16_t)((div255(r * 31) << 11) | (div255(g * 63) << 5) | div255(b * 31));
+}
+
 // Alpha blend a premultiplied RGBA8888 pixel over a RGB565 background
-uint16_t alpha_blend_premul_rgba8888_over_rgb565(uint16_t bg, uint32_t fg) 
+uint16_t alpha_blend_premul_rgba8888_over_rgb565(uint16_t bg, uint32_t fg)
 {
     uint32_t alpha = fg >> 24;
     if (alpha == 0)
         return bg;
-    uint32_t inv_a = 255 - alpha;
 
-    uint32_t fg_r = (fg >> 16) & 0xFF;
-    uint32_t fg_g = (fg >> 8)  & 0xFF;
-    uint32_t fg_b =  fg        & 0xFF;
-
-    uint32_t bg_r = ((bg >> 11) & 0x1F) << 3;
-    uint32_t bg_g = ((bg >> 5)  & 0x3F) << 2;
-    uint32_t bg_b = ( bg        & 0x1F) << 3;
-
-    // FG is premultiplied
-    uint32_t r = fg_r + (((bg_r * inv_a) * 257) >> 16);
-    uint32_t g = fg_g + (((bg_g * inv_a) * 257) >> 16);
-    uint32_t b = fg_b + (((bg_b * inv_a) * 257) >> 16);
-
-    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+    return blend_premul_over_rgb565(bg, (fg >> 16) & 0xFF, (fg >> 8) & 0xFF, fg & 0xFF, alpha);
 }
 
-// Alpha blend a premultiplied RGBA8888 pixel over a RGB565 background, with an 
+// Alpha blend a premultiplied RGBA8888 pixel over a RGB565 background, with an
 // additional blend alpha
-uint16_t alpha_blend_premul_rgba8888_over_rgb565_with_alpha(uint16_t bg, uint32_t fg, uint8_t alpha) 
+uint16_t alpha_blend_premul_rgba8888_over_rgb565_with_alpha(uint16_t bg, uint32_t fg, uint8_t alpha)
 {
-    // fg is already premultiplied with it's own alpha component
-    // but not the blend alpha
-    uint32_t fg_r = (((fg >> 16) & 0xFF) * alpha * 257) >> 16;
-    uint32_t fg_g = (((fg >> 8)  & 0xFF) * alpha * 257) >> 16;
-    uint32_t fg_b = (((fg >> 0)  & 0xFF) * alpha * 257) >> 16;
-
     // Combine the component alpha with the blend alpha
-    alpha = ((fg >> 24) * alpha * 257) >> 16;
-    if (alpha == 0)
+    uint32_t a = div255((fg >> 24) * alpha);
+    if (a == 0)
         return bg;
-    uint32_t inv_a = 255 - alpha;
 
-    uint32_t bg_r = (((bg >> 8) & 0xF8) * inv_a * 257) >> 16;
-    uint32_t bg_g = (((bg >> 3) & 0xFC) * inv_a * 257) >> 16;
-    uint32_t bg_b = (((bg << 3) & 0xF8) * inv_a * 257) >> 16;
-
-    // Combine
-    return (((fg_r + bg_r) >> 3) << 11) 
-         | (((fg_g + bg_g) >> 2) << 5) 
-         | (((fg_b + bg_b) >> 3) << 0);
+    // fg is already premultiplied with its own alpha but not the blend alpha
+    return blend_premul_over_rgb565(bg,
+        div255(((fg >> 16) & 0xFF) * alpha),
+        div255(((fg >> 8)  & 0xFF) * alpha),
+        div255(( fg        & 0xFF) * alpha),
+        a);
 }
 
-// Alpha blend an opaque RGB565 pixel over a RGB565 background, with an 
-// additional blend alpha
-uint16_t alpha_blend_rgb565_over_rgb565_with_alpha(uint16_t bg, uint16_t fg, uint8_t alpha) 
+// Alpha blend an opaque RGB565 pixel over a RGB565 background, with an
+// additional blend alpha.  Interpolates in each channel's native precision
+// so blending a color over itself leaves it unchanged.
+uint16_t alpha_blend_rgb565_over_rgb565_with_alpha(uint16_t bg, uint16_t fg, uint8_t alpha)
 {
     // Short cut
     if (alpha == 0)
@@ -71,23 +74,13 @@ uint16_t alpha_blend_rgb565_over_rgb565_with_alpha(uint16_t bg, uint16_t fg, uin
     if (alpha == 0xFF)
         return fg;
 
-    // Inv alpha
     uint32_t inv_a = 255 - alpha;
 
-    // Calc fg components scaled by alpha
-    uint32_t fg_r = (((fg >> 8) & 0xF8) * alpha * 257) >> 16;
-    uint32_t fg_g = (((fg >> 3) & 0xFC) * alpha * 257) >> 16;
-    uint32_t fg_b = (((fg << 3) & 0xF8) * alpha * 257) >> 16;
+    uint32_t r = div255(((fg >> 11) & 0x1F) * alpha + ((bg >> 11) & 0x1F) * inv_a);
+    uint32_t g = div255(((fg >> 5)  & 0x3F) * alpha + ((bg >> 5)  & 0x3F) * inv_a);
+    uint32_t b = div255(( fg        & 0x1F) * alpha + ( bg        & 0x1F) * inv_a);
 
-    // Calc bg components scaled by inv alpha
-    uint32_t bg_r = (((bg >> 8) & 0xF8) * inv_a * 257) >> 16;
-    uint32_t bg_g = (((bg >> 3) & 0xFC) * inv_a * 257) >> 16;
-    uint32_t bg_b = (((bg << 3) & 0xF8) * inv_a * 257) >> 16;
-
-    // Combine
-    return (((fg_r + bg_r) >> 3) << 11) 
-         | (((fg_g + bg_g) >> 2) << 5) 
-         | (((fg_b + bg_b) >> 3) << 0);
+    return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
 uint32_t get_image_packed_size(const void* image)
@@ -400,40 +393,35 @@ void draw_image(IMAGE_BUFFER* dest_buffer, const void* image, int32_t dest_x, in
     drawcores[flags](&args);
 }
 
-uint32_t unpremultiply_argb8888(uint32_t c) 
+uint32_t unpremultiply_argb8888(uint32_t c)
 {
-    uint8_t a = (c >> 24) & 0xFF;
-    uint8_t r = (c >> 16) & 0xFF;
-    uint8_t g = (c >> 8)  & 0xFF;
-    uint8_t b = (c >> 0)  & 0xFF;
+    uint32_t a = c >> 24;
+    if (a == 0)
+        return 0;
 
-    if (a == 0) {
-        return 0; // or (0x00000000)
-    }
-
-    // scale back up
-    r = (uint16_t)r * 255 / a;
-    g = (uint16_t)g * 255 / a;
-    b = (uint16_t)b * 255 / a;
+    // Scale back up, rounding to nearest and clamping bad (color > alpha) input
+    uint32_t r = (((c >> 16) & 0xFF) * 255 + a / 2) / a;
+    uint32_t g = (((c >> 8)  & 0xFF) * 255 + a / 2) / a;
+    uint32_t b = (( c        & 0xFF) * 255 + a / 2) / a;
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
 
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-uint32_t premultiply_argb8888(uint32_t c) 
+uint32_t premultiply_argb8888(uint32_t c)
 {
-    uint8_t a = (c >> 24) & 0xFF;
-    uint8_t r = (c >> 16) & 0xFF;
-    uint8_t g = (c >> 8)  & 0xFF;
-    uint8_t b = (c >> 0)  & 0xFF;
+    uint32_t a = c >> 24;
 
-    // fully transparent → force RGB = 0
-    if (a == 0) {
+    // Fully transparent: force RGB = 0
+    if (a == 0)
         return 0;
-    }
 
-    r = (uint16_t)r * a / 255;
-    g = (uint16_t)g * a / 255;
-    b = (uint16_t)b * a / 255;
+    // Round to nearest (matches the encoder)
+    uint32_t r = div255(((c >> 16) & 0xFF) * a);
+    uint32_t g = div255(((c >> 8)  & 0xFF) * a);
+    uint32_t b = div255(( c        & 0xFF) * a);
 
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
@@ -539,26 +527,14 @@ static uint32_t palette_entry_to_argb8888(uint32_t c, bool premultiplied)
     // so full intensity maps to 0xFF.
     if (a == 0xFF)
     {
-        uint32_t r = (c >> 11) & 0x1F;
-        uint32_t g = (c >> 5) & 0x3F;
-        uint32_t b = c & 0x1F;
-        r = (r << 3) | (r >> 2);
-        g = (g << 2) | (g >> 4);
-        b = (b << 3) | (b >> 2);
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
+        return 0xFF000000 | rgb565_to_rgb888(c);
     }
 
     // Partially transparent entries are already premultiplied ARGB8888
     if (premultiplied)
         return c;
 
-    uint32_t r = (((c >> 16) & 0xFF) * 255 + a / 2) / a;
-    uint32_t g = (((c >> 8) & 0xFF) * 255 + a / 2) / a;
-    uint32_t b = ((c & 0xFF) * 255 + a / 2) / a;
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-    return (a << 24) | (r << 16) | (g << 8) | b;
+    return unpremultiply_argb8888(c);
 }
 
 bool check_image_header(const void* image, size_t image_size)

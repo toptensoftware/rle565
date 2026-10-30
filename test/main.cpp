@@ -8,9 +8,17 @@
 #include "../src/rle565.h"
 
 void rgb565_to_888(uint16_t px, uint8_t *r, uint8_t *g, uint8_t *b) {
-    *r = ((px >> 11) & 0x1F) << 3;
-    *g = ((px >> 5)  & 0x3F) << 2;
-    *b = ((px >> 0)  & 0x1F) << 3;
+    uint32_t c = rgb565_to_rgb888(px);
+    *r = (uint8_t)(c >> 16);
+    *g = (uint8_t)(c >> 8);
+    *b = (uint8_t)c;
+}
+
+// Divide by 255 rounding to nearest (same as the library's blending)
+static uint32_t div255(uint32_t x)
+{
+    x += 128;
+    return (x + (x >> 8)) >> 8;
 }
 
 void write_bmp(const char *filename, uint16_t *pixels, int w, int h) {
@@ -71,6 +79,11 @@ void* read_bin(const char* filename, size_t* psize = NULL)
         *psize = size;
     return img;
 }
+
+// Blend helpers from rle565.c (not in the public header)
+extern "C" uint16_t alpha_blend_premul_rgba8888_over_rgb565(uint16_t bg, uint32_t fg);
+extern "C" uint16_t alpha_blend_premul_rgba8888_over_rgb565_with_alpha(uint16_t bg, uint32_t fg, uint8_t alpha);
+extern "C" uint16_t alpha_blend_rgb565_over_rgb565_with_alpha(uint16_t bg, uint16_t fg, uint8_t alpha);
 
 static int failures = 0;
 
@@ -290,14 +303,14 @@ int main()
             init_image_buffer(&refbuf, w, h, ref, w);
             draw_image(&refbuf, img, 0, 0, 0, 0, w, h, NULL, 0xFF, NULL);
 
-            // Premultiplied decode, reduced to 565, should match exactly
+            // Premultiplied decode, rounded to 565 like the blender, should match exactly
             uint32_t* dec = (uint32_t*)malloc(w * h * sizeof(uint32_t));
             bool ok = decode_image_argb8888(img, size, NULL, dec, 0, true);
             bool match = ok;
             for (uint32_t i = 0; ok && i < w * h; i++)
             {
                 uint32_t c = dec[i];
-                uint16_t px = (uint16_t)((((c >> 16) & 0xFF) >> 3) << 11 | (((c >> 8) & 0xFF) >> 2) << 5 | ((c & 0xFF) >> 3));
+                uint16_t px = (uint16_t)(div255(((c >> 16) & 0xFF) * 31) << 11 | div255(((c >> 8) & 0xFF) * 63) << 5 | div255((c & 0xFF) * 31));
                 if (px != ref[i])
                     match = false;
             }
@@ -416,6 +429,61 @@ int main()
         free(dec);
         free(copy);
         free(orig);
+    }
+
+    // 21: Color conversion and blending precision
+    {
+        // 565 -> 888 -> 565 round trips, and full intensity expands to 0xFF
+        bool roundTrip = rgb565_to_rgb888(0xFFFF) == 0xFFFFFF;
+        for (uint32_t c = 0; c < 0x10000; c++)
+            if (rgb888_to_rgb565(rgb565_to_rgb888(c)) != c)
+                roundTrip = false;
+        check(roundTrip, "21: rgb565 <-> rgb888 round trip");
+
+        // Blending a color over itself leaves it unchanged
+        bool identity = true;
+        const uint8_t alphas[] = { 1, 64, 128, 200, 254 };
+        for (uint32_t c = 0; c < 0x10000; c++)
+            for (uint8_t a : alphas)
+                if (alpha_blend_rgb565_over_rgb565_with_alpha((uint16_t)c, (uint16_t)c, a) != c)
+                    identity = false;
+        check(identity, "21: rgb565 blended over itself is unchanged");
+
+        // Nearly transparent pixels don't darken the background
+        check(alpha_blend_premul_rgba8888_over_rgb565(0xFFFF, 0x01000000) == 0xFFFF, "21: alpha 1 black over white stays white");
+        check(alpha_blend_premul_rgba8888_over_rgb565_with_alpha(0xFFFF, 0x80000000, 2) == 0xFFFF, "21: faded black over white stays white");
+
+        // Premultiplied white at any alpha over white stays white
+        bool whiteOk = true;
+        for (uint32_t a = 1; a < 256; a++)
+            if (alpha_blend_premul_rgba8888_over_rgb565(0xFFFF, (a << 24) | (a << 16) | (a << 8) | a) != 0xFFFF)
+                whiteOk = false;
+        check(whiteOk, "21: premultiplied white over white stays white");
+
+        // 50% red over blue
+        uint16_t mix = alpha_blend_rgb565_over_rgb565_with_alpha(0x001F, 0xF800, 128);
+        check(mix == ((16 << 11) | 15), "21: 50% red over blue");
+
+        // normalize + prepare leaves a palette unchanged
+        const uint32_t colors[] = { 0, 0xFF00FFFF, 0xFF000000, 0xFF00F800, 0xFF0007E0, 0xFF00001F, 0xFF001234, 0x80808080, 0x80400020, 0x10101010, 0xFE7F3F1F };
+        uint32_t n = sizeof(colors) / sizeof(colors[0]);
+        PALETTE* pal = (PALETTE*)malloc(sizeof(PALETTE) + n * sizeof(uint32_t));
+        pal->count = n;
+        memcpy(pal->colors, colors, sizeof(colors));
+        normalize_palette(pal);
+        bool whiteNormalized = pal->colors[1] == 0xFFFFFFFF;
+        prepare_palette(pal);
+        check(memcmp(pal->colors, colors, sizeof(colors)) == 0, "21: normalize + prepare round trips palette");
+        check(whiteNormalized, "21: normalize expands white to 0xFFFFFFFF");
+        free(pal);
+
+        // premultiply matches the encoder's rounding: (x + 128) * 257 >> 16
+        bool premulOk = true;
+        for (uint32_t a = 1; a < 256; a++)
+            for (uint32_t v = 0; v < 256; v++)
+                if (((premultiply_argb8888((a << 24) | (v << 16)) >> 16) & 0xFF) != (((v * a + 128) * 257) >> 16))
+                    premulOk = false;
+        check(premulOk, "21: premultiply matches encoder");
     }
 
     printf(failures ? "\n%d FAILED\n" : "\nAll checks passed\n", failures);
