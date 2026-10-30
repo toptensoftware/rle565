@@ -1,0 +1,39 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run C++ Test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/test/build/x64/debug/bin/test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/test/",
+            "environment": [],
+            "console": "integratedTerminal"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Run Render Script",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}\\test\\render.js",
+            "cwd": "${workspaceFolder}\\test\\"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Run gencore",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}\\gencore.js",
+            "cwd": "${workspaceFolder}\\"
+        }
+    ]
+}
