@@ -3,17 +3,23 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { packRle, packPalette, PaletteBuilder } from "./pack.js";
+import { unpackRleToPng, readPalette } from "./unpack.js";
 
-const HELP = `Usage: rle565 [options] <input.png...>
+const HELP = `Usage: rle565 [options] <input...>
 
-Encodes PNG images to the rle565 run length encoded RGB565 format.
+Encodes PNG images to the rle565 run length encoded RGB565 format, and
+decodes .rle565 images back to PNG.  Each input is converted based on its
+extension: .rle565 files are decoded, anything else is encoded.
 
 Options:
   -o, --output <file>          Output file (single input only).
-                               Default: <input-name>.rle565
+                               Default: <input-name>.rle565 when encoding,
+                               <input-name>.png when decoding
   -d, --outdir <dir>           Output directory. Default: same directory as
                                each input. Relative --output and
                                --shared-palette paths are resolved against it.
+
+Encoding options:
   -b, --background <bg>        Composite over a background before encoding.
                                Either a .png file, or a solid color as
                                #RRGGBB, 0xRRGGBB or RRGGBB.
@@ -22,6 +28,12 @@ Options:
   -p, --shared-palette <file>  Build one palette shared by all inputs, write
                                it to <file> and leave it out of each image.
                                Pass the palette to draw_image() at runtime.
+
+Decoding options:
+  -P, --palette <file>         Palette file (from --shared-palette) for
+                               images encoded with a shared palette.
+
+General:
   -v, --verbose                Print encoding statistics.
   -h, --help                   Show this help.
 `;
@@ -83,6 +95,7 @@ try
             "background":     { type: "string",  short: "b" },
             "alpha-rect":     { type: "string",  short: "a", multiple: true },
             "shared-palette": { type: "string",  short: "p" },
+            "palette":        { type: "string",  short: "P" },
             "verbose":        { type: "boolean", short: "v" },
             "help":           { type: "boolean", short: "h" },
         },
@@ -111,6 +124,8 @@ for (const input of inputs)
     if (!fs.existsSync(input))
         fail(`input file '${input}' not found`);
 }
+if (opts.palette && !fs.existsSync(opts.palette))
+    fail(`palette file '${opts.palette}' not found`);
 
 // Resolve a path against --outdir (if given)
 function inOutdir(file)
@@ -118,13 +133,23 @@ function inOutdir(file)
     return opts.outdir ? path.resolve(opts.outdir, file) : file;
 }
 
+function isRle565(file)
+{
+    return path.extname(file).toLowerCase() == ".rle565";
+}
+
 function outputFor(input)
 {
     if (opts.output)
         return inOutdir(opts.output);
-    const name = path.basename(input, path.extname(input)) + ".rle565";
+    const ext = isRle565(input) ? ".png" : ".rle565";
+    const name = path.basename(input, path.extname(input)) + ext;
     return path.join(opts.outdir ?? path.dirname(input), name);
 }
+
+const encodeInputs = inputs.filter(f => !isRle565(f));
+if (opts["shared-palette"] && encodeInputs.length == 0)
+    fail("--shared-palette needs at least one image to encode");
 
 const packOptions = {
     background: opts.background != null ? parseBackground(opts.background) : null,
@@ -137,7 +162,7 @@ try
     if (opts["shared-palette"])
     {
         const builder = new PaletteBuilder();
-        for (const input of inputs)
+        for (const input of encodeInputs)
             await packRle(input, { ...packOptions, paletteBuilder: builder });
         packOptions.palette = builder.finalize();
 
@@ -147,12 +172,33 @@ try
         console.log(`${paletteFile} (${packOptions.palette.palette.length} colors)`);
     }
 
+    // Palette for decoding shared palette images
+    const decodeOptions = {};
+    if (opts.palette)
+        decodeOptions.palette = readPalette(fs.readFileSync(opts.palette));
+
     for (const input of inputs)
     {
         const output = outputFor(input);
-        const packed = await packRle(input, packOptions);
-
         fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });
+
+        if (isRle565(input))
+        {
+            let image;
+            try
+            {
+                image = await unpackRleToPng(fs.readFileSync(input), output, decodeOptions);
+            }
+            catch (err)
+            {
+                const hint = opts.palette ? "" : / shared palette/.test(err.message) ? " (use --palette)" : "";
+                throw new Error(`${input}: ${err.message}${hint}`);
+            }
+            console.log(`${output} (${image.width}x${image.height})`);
+            continue;
+        }
+
+        const packed = await packRle(input, packOptions);
         fs.writeFileSync(output, packed.data);
 
         if (opts.verbose)

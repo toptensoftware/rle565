@@ -25,7 +25,7 @@ needed), decodes each file, runs a set of checks, and with `-o` writes each
 image back out as PNG through the system WIC encoder:
 
 ```
-build\x64\Release\wictest.exe ..\test\artwork\circles.bin -o out
+build\x64\Release\wictest.exe ..\test\artwork\circles.rle565 -o out
 ```
 
 ## Installing

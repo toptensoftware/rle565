@@ -8,7 +8,7 @@ for (let f of ["circles", "red-circle", "grey-gradient", "square", "transparent-
     console.log(`----- ${f} -----`);
 
     var packed = await packRle(`./artwork/${f}.png`, null, null);
-    fs.writeFileSync(`./artwork/${f}.bin`, packed.data);
+    fs.writeFileSync(`./artwork/${f}.rle565`, packed.data);
 
     delete packed.data;
     console.log(packed);

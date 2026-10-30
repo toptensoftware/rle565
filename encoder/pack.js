@@ -2,11 +2,11 @@ import sharp from "sharp";
 import assert from "assert";
 import { BufferBuilder } from "./BufferBuilder.js"
 
-const IMAGE_SIGNATURE = 0x35363552;     // "R565" little endian
-const IMAGE_FORMAT_RLE = 1;
-const IMAGE_FORMAT_BUFFER = 2;
-const DRAW_FLAGS_ALPHA_PIXELS = 0x01;
-const DRAW_FLAGS_LARGE_PALETTE = 0x02;
+export const IMAGE_SIGNATURE = 0x35363552;     // "R565" little endian
+export const IMAGE_FORMAT_RLE = 1;
+export const IMAGE_FORMAT_BUFFER = 2;
+export const DRAW_FLAGS_ALPHA_PIXELS = 0x01;
+export const DRAW_FLAGS_LARGE_PALETTE = 0x02;
 
 
 // Quantize a PNG's RGB channels to 565-bit precision

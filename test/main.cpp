@@ -95,11 +95,11 @@ int main()
     init_image_buffer(&buf, 800, 480, bufmem, 800);
 
     // Read source images
-    void* gradient = read_bin("./artwork/grey-gradient.bin");
-    void* square = read_bin("./artwork/square.bin");
-    void* transparent_square = read_bin("./artwork/transparent-square.bin");
-    void* circles = read_bin("./artwork/circles.bin");
-    void* red_circle = read_bin("./artwork/red-circle.bin");
+    void* gradient = read_bin("./artwork/grey-gradient.rle565");
+    void* square = read_bin("./artwork/square.rle565");
+    void* transparent_square = read_bin("./artwork/transparent-square.rle565");
+    void* circles = read_bin("./artwork/circles.rle565");
+    void* red_circle = read_bin("./artwork/red-circle.rle565");
 
     // Draw it
     draw_image(&buf, gradient, 0, 0, 0, 0, get_image_width(gradient), get_image_height(gradient), NULL, 0xFF, NULL);
@@ -278,7 +278,7 @@ int main()
         for (const char* name : names)
         {
             char path[256];
-            snprintf(path, sizeof(path), "./artwork/%s.bin", name);
+            snprintf(path, sizeof(path), "./artwork/%s.rle565", name);
             size_t size;
             void* img = read_bin(path, &size);
             uint32_t w = get_image_width(img);
@@ -334,7 +334,7 @@ int main()
     // 19: Truncated and corrupted data must fail cleanly (no crash)
     {
         size_t size;
-        void* orig = read_bin("./artwork/circles.bin", &size);
+        void* orig = read_bin("./artwork/circles.rle565", &size);
         uint32_t w = get_image_width(orig);
         uint32_t h = get_image_height(orig);
         uint32_t* dec = (uint32_t*)malloc(w * h * sizeof(uint32_t));
@@ -379,7 +379,7 @@ int main()
     // 20: Header checks
     {
         size_t size;
-        uint8_t* orig = (uint8_t*)read_bin("./artwork/red-circle.bin", &size);
+        uint8_t* orig = (uint8_t*)read_bin("./artwork/red-circle.rle565", &size);
         uint8_t* copy = (uint8_t*)malloc(size + 100);
         uint32_t* dec = (uint32_t*)malloc(300 * 300 * sizeof(uint32_t));
 
