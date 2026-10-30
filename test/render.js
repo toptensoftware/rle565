@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { packRle, quantizePngTo565 } from '../pack.js';
+import { packRle, quantizePngTo565 } from '../encoder/pack.js';
 
 await quantizePngTo565("artwork/grey-gradient.png");
 

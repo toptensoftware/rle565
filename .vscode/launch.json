@@ -32,7 +32,7 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "program": "${workspaceFolder}\\gencore.js",
+            "program": "${workspaceFolder}\\src\\gencore.js",
             "cwd": "${workspaceFolder}\\"
         }
     ]

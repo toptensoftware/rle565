@@ -1513,9 +1513,9 @@ static void drawcore_10100(DRAWARGS* args)
             {
                 uint32_t pi = *runs++;
                 uint32_t pixel = palette[pi];
-                capture_helper(args, rowBuffer, pixCount);
                 if (pixel != 0)
                 {
+                    capture_helper(args, rowBuffer, pixCount);
                     for (uint32_t i=0; i<pixCount; i++)
                     {
                         *rowBuffer = alpha_blend_rgb565_over_rgb565_with_alpha(*rowBuffer, pixel, args->alpha);
@@ -1643,9 +1643,9 @@ static void drawcore_10110(DRAWARGS* args)
             {
                 uint32_t pi = ReadVarLen(&runs);
                 uint32_t pixel = palette[pi];
-                capture_helper(args, rowBuffer, pixCount);
                 if (pixel != 0)
                 {
+                    capture_helper(args, rowBuffer, pixCount);
                     for (uint32_t i=0; i<pixCount; i++)
                     {
                         *rowBuffer = alpha_blend_rgb565_over_rgb565_with_alpha(*rowBuffer, pixel, args->alpha);
@@ -2173,9 +2173,9 @@ static void drawcore_11100(DRAWARGS* args)
             {
                 uint32_t pi = *runs++;
                 uint32_t pixel = palette[pi];
-                capture_helper(args, rowBuffer, pixCount);
                 if (pixel != 0)
                 {
+                    capture_helper(args, rowBuffer, pixCount);
                     for (uint32_t i=0; i<pixCount; i++)
                     {
                         *rowBuffer = alpha_blend_rgb565_over_rgb565_with_alpha(*rowBuffer, pixel, args->alpha);
@@ -2353,9 +2353,9 @@ static void drawcore_11110(DRAWARGS* args)
             {
                 uint32_t pi = ReadVarLen(&runs);
                 uint32_t pixel = palette[pi];
-                capture_helper(args, rowBuffer, pixCount);
                 if (pixel != 0)
                 {
+                    capture_helper(args, rowBuffer, pixCount);
                     for (uint32_t i=0; i<pixCount; i++)
                     {
                         *rowBuffer = alpha_blend_rgb565_over_rgb565_with_alpha(*rowBuffer, pixel, args->alpha);

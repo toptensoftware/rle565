@@ -3,7 +3,7 @@ import assert from "assert";
 import { BufferBuilder } from "./BufferBuilder.js"
 
 const IMAGE_FORMAT_RLE = 1;
-const IMAGE_FORMAT_FLAT = 2;
+const IMAGE_FORMAT_BUFFER = 2;
 const DRAW_FLAGS_ALPHA_PIXELS = 0x01;
 const DRAW_FLAGS_LARGE_PALETTE = 0x02;
 
@@ -115,24 +115,6 @@ export class PaletteBuilder
     #colorUsage = new Map();
 }
 
-// Create color map and palette for an image
-function createPalette(image)
-{
-    let palette = new PaletteBuilder();
-
-    for (let y = 0; y < image.info.height; y++)
-    {
-        for (let x =0; x < image.info.width; x++)
-        {
-            let px = readPixel(image, x, y);
-            palette.addColor(px);
-        }
-    }
-
-    return palette.finalize();
-}
-
-
 // Given a png image, packs it into RLE format
 export async function packRle(image, options)
 {
@@ -166,7 +148,7 @@ export async function packRle(image, options)
     if (typeof(options.background) === 'string')
     {
         // Background image file
-        bakedImage = await sharp(background)
+        bakedImage = await sharp(options.background)
             .ensureAlpha()
             .composite([{ 
                 input: image.data,
@@ -182,15 +164,6 @@ export async function packRle(image, options)
         const svg = `<svg width="${image.info.width}" height="${image.info.height}" xmlns="http://www.w3.org/2000/svg">
                     <rect width="100%" height="100%" fill="${color}"/>
                     </svg>`;
-
-        await sharp(Buffer.from(svg))
-            .ensureAlpha()
-            .composite([{ 
-                input: image.data,
-                raw: image.info,
-            }])
-            .png()                 // convert to PNG
-            .toFile('debug.png')  // save to disk
 
         bakedImage = await sharp(Buffer.from(svg))
             .ensureAlpha()
@@ -231,6 +204,8 @@ export async function packRle(image, options)
         }
     }
     let rowCount = firstRow == null ? 0 : lastRow - firstRow + 1;
+    if (firstRow == null)
+        firstRow = 0;
 
     function readBakedPixel(x, y)
     {
@@ -242,10 +217,6 @@ export async function packRle(image, options)
         // Read pre-baked pixel?
         if (bakedImage)
         {
-            if (x ==43 && y == 15)
-            {debugger;}
-
-
             // If not in an alpha rect, use the baked pixel
             if (!options.alphaRects.some(r => y >= r.top && y < r.top + r.height && x >= r.left && x < r.left + r.width))
             {

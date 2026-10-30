@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <assert.h>
 
-#ifdef _cplusplus
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -32,6 +32,6 @@ static inline uint32_t get_blob_size(const BLOBPACK* bp, uint32_t index)
     return bp->blobOffsets[index + 1] - bp->blobOffsets[index];
 }
 
-#ifdef _cplusplus
+#ifdef __cplusplus
 }
 #endif

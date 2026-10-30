@@ -24,7 +24,7 @@ extern "C" {
 
 // Helpers to premultiply/unpremultiply alpha for ARGB8888 colors
 uint32_t unpremultiply_argb8888(uint32_t c);
-uint32_t premultiply_argb888(uint32_t c);
+uint32_t premultiply_argb8888(uint32_t c);
 
 #pragma pack(push, 1)
 

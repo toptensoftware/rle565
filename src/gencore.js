@@ -151,12 +151,13 @@ for (let i=0; i<32; i++)
     }
     else if (alphaBlend)
     {
+    o += "                if (pixel != 0)\n";
+    o += "                {\n";
     if (capture)
     {
-    o += "                capture_helper(args, rowBuffer, pixCount);\n";
+    // Only capture visible runs - encoder's captureSize excludes transparent runs
+    o += "                    capture_helper(args, rowBuffer, pixCount);\n";
     }
-    o += "                if (pixel != 0)\n";
-    o += "                {\n"; 
     o += "                    for (uint32_t i=0; i<pixCount; i++)\n";
     o += "                    {\n";
     o += "                        *rowBuffer = alpha_blend_rgb565_over_rgb565_with_alpha(*rowBuffer, pixel, args->alpha);\n";

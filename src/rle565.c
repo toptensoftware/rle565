@@ -243,23 +243,38 @@ static void capture_helper(DRAWARGS* args, uint16_t* pixels, uint32_t pixelCount
     // Work out offset
     uint32_t capOffset = (uint32_t)((uint8_t*)pixels - (uint8_t*)args->caproot);
 
-    if (!args->captureRun)
+    while (pixelCount)
     {
-        // First captured run
-        args->captureRun = (CAPTURERUN*)args->captureBuffer;
-        args->captureRun->offset = capOffset;
-        args->captureRun->pixelCount = 0;
-    }
-    else if (args->captureRun->offset + args->captureRun->pixelCount * sizeof(uint16_t) != capOffset)
-    {
-        // Start a new capture run
-        args->captureRun = (CAPTURERUN*)end_of_caprun(args->captureRun);
-        args->captureRun->offset = capOffset;
-        args->captureRun->pixelCount = 0;
-    }
+        if (!args->captureRun)
+        {
+            // First captured run
+            args->captureRun = (CAPTURERUN*)args->captureBuffer;
+            args->captureRun->offset = capOffset;
+            args->captureRun->pixelCount = 0;
+        }
+        else if (args->captureRun->offset + args->captureRun->pixelCount * sizeof(uint16_t) != capOffset
+              || args->captureRun->pixelCount == UINT16_MAX)
+        {
+            // Start a new capture run (not contiguous, or current run is full)
+            args->captureRun = (CAPTURERUN*)end_of_caprun(args->captureRun);
+            args->captureRun->offset = capOffset;
+            args->captureRun->pixelCount = 0;
+        }
 
-    memcpy(end_of_caprun(args->captureRun), pixels, pixelCount * sizeof(uint16_t));
-    args->captureRun->pixelCount += pixelCount;
+        // Append as many pixels as fit in the current run's 16-bit count.  Runs
+        // only get this long when spans merge across rows (stride == width) so
+        // splitting never needs more run headers than the encoder allowed for.
+        uint32_t n = UINT16_MAX - args->captureRun->pixelCount;
+        if (n > pixelCount)
+            n = pixelCount;
+
+        memcpy(end_of_caprun(args->captureRun), pixels, n * sizeof(uint16_t));
+        args->captureRun->pixelCount += (uint16_t)n;
+
+        pixels += n;
+        pixelCount -= n;
+        capOffset += n * sizeof(uint16_t);
+    }
 }
 
 static void capture_finalize(DRAWARGS* args)
@@ -294,74 +309,78 @@ void draw_image(IMAGE_BUFFER* dest_buffer, const void* image, int32_t dest_x, in
     const IMAGE_RLE* header = (const IMAGE_RLE*)image;
     assert(header->base.format == IMAGE_FORMAT_RLE);
 
-    src_x -= dest_x;
-    width += dest_x;
-    src_y -= dest_y;
-    height += dest_y;
+    // Images packed against a shared palette don't carry their own
+    assert(palette != nullptr || header->paletteOffset != 0);
+
+    // Start with an empty capture so restore_image is safe even if
+    // nothing gets drawn
+    if (cap != nullptr)
+    {
+        CAPTURERUN* term = (CAPTURERUN*)cap;
+        term->offset = 0;
+        term->pixelCount = 0;
+    }
 
     // Quit if transparent
     if (alpha == 0)
         return;
 
-    // Out of range
-    if (src_y + (int32_t)height < 0 || src_y >= (int32_t)header->base.height)
+    // Work in 64-bit signed so nothing can wrap
+    int64_t sx = src_x;
+    int64_t sy = src_y;
+    int64_t dx = dest_x;
+    int64_t dy = dest_y;
+    int64_t w = width;
+    int64_t h = height;
+
+    // Clip source rectangle to the image (negative source coords
+    // shift the drawn area right/down in the destination)
+    if (sx < 0) { dx -= sx; w += sx; sx = 0; }
+    if (sy < 0) { dy -= sy; h += sy; sy = 0; }
+    if (sx + w > (int64_t)header->base.width)
+        w = (int64_t)header->base.width - sx;
+    if (sy + h > (int64_t)header->base.height)
+        h = (int64_t)header->base.height - sy;
+
+    // Clip to the destination buffer
+    if (dx < 0) { sx -= dx; w += dx; dx = 0; }
+    if (dy < 0) { sy -= dy; h += dy; dy = 0; }
+    if (dx + w > (int64_t)dest_buffer->base.width)
+        w = (int64_t)dest_buffer->base.width - dx;
+    if (dy + h > (int64_t)dest_buffer->base.height)
+        h = (int64_t)dest_buffer->base.height - dy;
+
+    // Clip to the rows actually stored in the image
+    int64_t firstRow = header->firstRow;
+    int64_t endRow = firstRow + header->rowCount;
+    if (sy < firstRow)
+    {
+        dy += firstRow - sy;
+        h -= firstRow - sy;
+        sy = firstRow;
+    }
+    if (sy + h > endRow)
+        h = endRow - sy;
+
+    // Nothing left to draw?
+    if (w <= 0 || h <= 0)
         return;
-    if (src_x + (int32_t)width < 0 || src_x >= (int32_t)header->base.width)
-        return;
-
-    uint16_t* buffer = dest_buffer->buffer;
-
-    // Clip top
-    if (src_y < 0)
-    {
-        buffer += -src_y * dest_buffer->stride;
-        height -= -src_y;
-        src_y = 0;
-    }
-
-    // Clip left
-    if (src_x < 0)
-    {
-        buffer += -src_x;
-        width -= -src_x;
-        src_x = 0;
-    }
-
-    // Clip right
-    if (width > dest_buffer->base.width)
-        width = dest_buffer->base.width;
-
-    // Clip bottom
-    if (height > dest_buffer->base.height)
-        height = dest_buffer->base.height;
-
-    // Move to first row
-    if (src_y < (int32_t)header->firstRow)
-    {
-        buffer += (header->firstRow - src_y) * dest_buffer->stride;
-        height -= header->firstRow - src_y;
-        src_y = header->firstRow;
-    }
-
-    // Stop end last row
-    if (src_y + height > header->firstRow + header->rowCount)
-        height = header->firstRow + header->rowCount - src_y;
 
     // Setup drawing args
     DRAWARGS args;
-    args.buffer = buffer;
+    args.buffer = dest_buffer->buffer + dy * dest_buffer->stride + dx;
     args.caproot = dest_buffer->buffer;
     args.stride = dest_buffer->stride;
     args.header = header;
-    args.src_x = src_x;
-    args.src_y = src_y;
-    args.width = width;
-    args.height = height;
+    args.src_x = (int32_t)sx;
+    args.src_y = (int32_t)sy;
+    args.width = (uint32_t)w;
+    args.height = (uint32_t)h;
     args.alpha = alpha;
     args.captureBuffer = cap;
     args.captureRun = nullptr;
-    args.iy_start = src_y - header->firstRow;
-    args.iy_end = src_y + height - header->firstRow;
+    args.iy_start = (uint32_t)(sy - firstRow);
+    args.iy_end = (uint32_t)(sy + h - firstRow);
     args.rowOffsets = (const uint32_t*)(((uint8_t*)image) + sizeof(*header));
     args.palette = palette ? palette : (const PALETTE*)((char*)image + header->paletteOffset);
 
@@ -369,7 +388,7 @@ void draw_image(IMAGE_BUFFER* dest_buffer, const void* image, int32_t dest_x, in
     uint32_t flags = header->base.flags;
     if (alpha != 255)
         flags |= DRAW_FLAGS_ALPHA_BLEND;
-    if (src_x != 0 || width != header->base.width)
+    if (sx != 0 || w != (int64_t)header->base.width)
         flags |= DRAW_FLAGS_XCLIP;
     if (cap != nullptr)
         flags |= DRAW_FLAGS_CAPTURE;
@@ -397,7 +416,7 @@ uint32_t unpremultiply_argb8888(uint32_t c)
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-uint32_t premultiply_argb888(uint32_t c) 
+uint32_t premultiply_argb8888(uint32_t c) 
 {
     uint8_t a = (c >> 24) & 0xFF;
     uint8_t r = (c >> 16) & 0xFF;
@@ -443,7 +462,7 @@ void prepare_palette(PALETTE* palette)
         }
         else
         {
-            palette->colors[i] = premultiply_argb888(px);
+            palette->colors[i] = premultiply_argb8888(px);
         }
     }
 }
