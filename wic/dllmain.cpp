@@ -133,6 +133,9 @@ STDAPI DllCanUnloadNow()
 //  * The decoder in WIC's decoder category
 //  * .rle565 as an image so Explorer uses its photo thumbnail provider
 //    (which uses WIC) for thumbnails and the preview pane
+//  * If Windows Photo Viewer is installed, a ProgID that opens .rle565 files
+//    in it, listed in its Capabilities so "Open with" shows it by name.  It's
+//    made the default for .rle565 only if there's no default already.
 
 namespace
 {
@@ -150,6 +153,17 @@ namespace
     const wchar_t* const SHELLEX_THUMBNAIL = L"{e357fccd-a995-4576-b01f-234630154e96}";
     const wchar_t* const PHOTO_THUMBNAIL_PROVIDER = L"{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}";
 
+    // Windows Photo Viewer integration, modelled on its own registration for
+    // .tif (PhotoViewer.FileAssoc.Tiff)
+    const wchar_t* const PROGID = L"Rle565.Image";
+    const wchar_t* const PROGID_NAME = L"RLE565 Image";
+    const wchar_t* const PHOTOVIEWER_DLL = L"%ProgramFiles%\\Windows Photo Viewer\\PhotoViewer.dll";
+    const wchar_t* const PHOTOVIEWER_COMMAND = L"%SystemRoot%\\System32\\rundll32.exe \"%ProgramFiles%\\Windows Photo Viewer\\PhotoViewer.dll\", ImageView_Fullscreen %1";
+    const wchar_t* const PHOTOVIEWER_OPEN_VERB = L"@%ProgramFiles%\\Windows Photo Viewer\\photoviewer.dll,-3043";
+    const wchar_t* const PHOTOVIEWER_DROPTARGET = L"{FFE2A43C-56B9-4bf5-9A79-CC6D4285608A}";
+    const wchar_t* const PHOTOVIEWER_ASSOCIATIONS = L"SOFTWARE\\Microsoft\\Windows Photo Viewer\\Capabilities\\FileAssociations";
+    const wchar_t* const PROGID_ICON = L"%SystemRoot%\\System32\\imageres.dll,-122";
+
     std::wstring GuidString(const GUID& guid)
     {
         wchar_t buf[40];
@@ -165,6 +179,17 @@ namespace
         {
             Check(RegSetKeyValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, REG_SZ,
                 value.c_str(), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))));
+        }
+
+        void SetExpandString(const std::wstring& key, const wchar_t* name, const std::wstring& value)
+        {
+            Check(RegSetKeyValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, REG_EXPAND_SZ,
+                value.c_str(), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))));
+        }
+
+        void SetNone(const std::wstring& key, const wchar_t* name)
+        {
+            Check(RegSetKeyValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, REG_NONE, nullptr, 0));
         }
 
         void SetDword(const std::wstring& key, const wchar_t* name, DWORD value)
@@ -206,16 +231,34 @@ namespace
         return !(IsWow64Process(GetCurrentProcess(), &wow64) && wow64);
     }
 
-    // Delete a value-less ShellEx key only if it still points where we set it
-    void DeleteShellExIfOurs(const std::wstring& key, const wchar_t* expected)
+    // Does a string value exist (name nullptr = default value)?
+    bool HasValue(const std::wstring& key, const wchar_t* name)
+    {
+        return RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, RRF_RT_REG_SZ, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    }
+
+    // Is a string value set to the expected value (case insensitive)?
+    bool ValueEquals(const std::wstring& key, const wchar_t* name, const wchar_t* expected)
     {
         wchar_t value[64] = {};
         DWORD size = sizeof(value) - sizeof(wchar_t);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), nullptr, RRF_RT_REG_SZ, nullptr, value, &size) == ERROR_SUCCESS
-            && _wcsicmp(value, expected) == 0)
-        {
+        return RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), name, RRF_RT_REG_SZ, nullptr, value, &size) == ERROR_SUCCESS
+            && _wcsicmp(value, expected) == 0;
+    }
+
+    // Delete a value-less ShellEx key only if it still points where we set it
+    void DeleteShellExIfOurs(const std::wstring& key, const wchar_t* expected)
+    {
+        if (ValueEquals(key, nullptr, expected))
             RegDeleteKeyW(HKEY_LOCAL_MACHINE, key.c_str());
-        }
+    }
+
+    // Windows Photo Viewer still ships with Windows but may be absent
+    bool IsPhotoViewerInstalled()
+    {
+        wchar_t path[MAX_PATH];
+        DWORD len = ExpandEnvironmentStringsW(PHOTOVIEWER_DLL, path, ARRAYSIZE(path));
+        return len > 0 && len <= ARRAYSIZE(path) && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
     }
 }
 
@@ -279,6 +322,27 @@ STDAPI DllRegisterServer()
         reg.SetString(extKey, L"PerceivedType", L"image");
         reg.SetString(extKey + L"\\ShellEx\\" + SHELLEX_THUMBNAIL, nullptr, PHOTO_THUMBNAIL_PROVIDER);
         reg.SetString(KINDMAP, FILE_EXTENSION, L"picture");
+
+        // Open with Windows Photo Viewer
+        if (IsPhotoViewerInstalled())
+        {
+            const std::wstring progIdKey = classes + PROGID;
+            reg.SetString(progIdKey, nullptr, PROGID_NAME);
+            reg.SetString(progIdKey, L"FriendlyTypeName", PROGID_NAME);
+            reg.SetDword(progIdKey, L"EditFlags", 0x00200000);
+            reg.SetDword(progIdKey, L"ImageOptionFlags", 1);
+            reg.SetExpandString(progIdKey + L"\\DefaultIcon", nullptr, PROGID_ICON);
+            reg.SetExpandString(progIdKey + L"\\shell\\open", L"MuiVerb", PHOTOVIEWER_OPEN_VERB);
+            reg.SetExpandString(progIdKey + L"\\shell\\open\\command", nullptr, PHOTOVIEWER_COMMAND);
+            reg.SetString(progIdKey + L"\\shell\\open\\DropTarget", L"Clsid", PHOTOVIEWER_DROPTARGET);
+
+            reg.SetString(PHOTOVIEWER_ASSOCIATIONS, FILE_EXTENSION, PROGID);
+            reg.SetNone(extKey + L"\\OpenWithProgids", PROGID);
+
+            // Default for double-click, unless something else already is
+            if (!HasValue(extKey, nullptr))
+                reg.SetString(extKey, nullptr, PROGID);
+        }
     }
 
     HRESULT hr = reg.Result();
@@ -304,6 +368,16 @@ STDAPI DllUnregisterServer()
         DeleteShellExIfOurs(extKey + L"\\ShellEx\\" + SHELLEX_THUMBNAIL, PHOTO_THUMBNAIL_PROVIDER);
         RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, extKey.c_str(), L"Content Type");
         RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, extKey.c_str(), L"PerceivedType");
+
+        // Photo Viewer integration
+        if (ValueEquals(extKey, nullptr, PROGID))
+            RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, extKey.c_str(), nullptr);
+        RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, (extKey + L"\\OpenWithProgids").c_str(), PROGID);
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, (extKey + L"\\OpenWithProgids").c_str());
+        if (ValueEquals(PHOTOVIEWER_ASSOCIATIONS, FILE_EXTENSION, PROGID))
+            RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, PHOTOVIEWER_ASSOCIATIONS, FILE_EXTENSION);
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, (classes + PROGID).c_str());
+
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, (extKey + L"\\ShellEx").c_str());
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, extKey.c_str());
         RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, KINDMAP, FILE_EXTENSION);

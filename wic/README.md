@@ -48,6 +48,14 @@ Registration is machine wide (`HKLM\SOFTWARE\Classes`) and adds:
   Windows' Photo Thumbnail Provider as its thumbnail handler, plus a
   `picture` KindMap entry. (The x86 DLL skips these on 64-bit Windows as
   they're shared.)
+- If Windows Photo Viewer is installed, an `Rle565.Image` ProgID that opens
+  `.rle565` files in it, listed in Photo Viewer's Capabilities and the
+  extension's "Open with" list. It's made the double-click default only if
+  `.rle565` doesn't already have a default.
+
+The modern Photos app can decode `.rle565` with this codec, but it only opens
+the file extensions declared in its package manifest, so it can't be used
+for `.rle565` files.
 
 Explorer caches thumbnails, so files viewed before registering may need the
 thumbnail cache cleared (Disk Cleanup → Thumbnails) or Explorer restarted.
