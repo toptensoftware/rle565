@@ -128,8 +128,9 @@ wic/
 
 ## Quick start
 
-1. Install the encoder's dependencies (Node.js 18.17 or later; uses
-   [sharp](https://sharp.pixelplumbing.com/) for image loading):
+1. Install the encoder's dependencies. Needs Node.js 18.17 or later (the
+   minimum for [sharp](https://sharp.pixelplumbing.com/), used for image
+   loading). Tested with Node.js 24; a current LTS release is recommended.
 
    ```
    cd encoder

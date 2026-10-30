@@ -5,6 +5,9 @@
   "license": "MIT",
   "author": "Topten Software",
   "type": "module",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "main": "pack.js",
   "bin": {
     "rle565": "cli.js"
