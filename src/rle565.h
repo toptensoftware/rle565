@@ -185,9 +185,9 @@ void recolor_palette(PALETTE* palette, uint32_t colorA, uint32_t colorB, int cha
 // Fonts
 //
 // A packed font is one font at one size, pre-rasterized to 8-bit coverage
-// bitmaps that can be drawn with draw_alpha_mask().  Built from
-// msdf-atlas-gen output by encoder/font.js.  All values are little endian
-// and the blob must be 4-byte aligned:
+// bitmaps that are drawn with draw_alpha_mask().  Built from TrueType /
+// OpenType fonts by encoder/font.js.  All values are little endian and the
+// blob must be 4-byte aligned:
 //
 //   FONT            header
 //   FONT_GLYPH[]    glyphCount glyphs, sorted by codepoint
@@ -197,6 +197,13 @@ void recolor_palette(PALETTE* palette, uint32_t colorA, uint32_t colorB, int cha
 //
 // Positions are in pixels with y down, relative to the pen position on the
 // baseline.  Advances and kerning are in 1/64 pixels.
+//
+// Subpixel positioning: a font can be rendered at `subpixel` horizontal
+// positions per pixel (1, 2, 4 or 8).  Each glyph then has that many
+// bitmaps, one after the other, all the same size: bitmap i is the glyph
+// shifted right by i / subpixel pixels.  The pen moves in steps of
+// 1 / subpixel pixels, and each glyph is drawn with the bitmap matching the
+// pen's fractional position.
 //
 // The hash table maps codepoints to glyph indexes with linear probing:
 // start at slot (codepoint * 0x9E3779B1) >> (32 - hashBits) and step
@@ -228,7 +235,7 @@ struct FONT                         // 52 bytes
     uint16_t glyphCount;
     uint16_t defaultGlyph;          // glyph for missing characters, or FONT_NO_GLYPH
     uint16_t hashBits;              // hash table has 1 << hashBits slots
-    uint16_t reserved;
+    uint16_t subpixel;              // horizontal positions per pixel: 1 (none), 2, 4 or 8
     uint32_t kerningCount;          // total kerning pairs
     uint32_t glyphsOffset;          // offsets from start of font
     uint32_t kerningOffset;
@@ -239,7 +246,7 @@ struct FONT                         // 52 bytes
 struct FONT_GLYPH                   // 24 bytes
 {
     uint32_t codepoint;             // Unicode codepoint
-    uint32_t bitmap;                // offset of bitmap from bitmapsOffset
+    uint32_t bitmap;                // offset of (first) bitmap from bitmapsOffset
     uint32_t kerning;               // index of first kerning pair with this glyph on the left
     uint16_t width;                 // bitmap size, stride = width.  0 for blank glyphs
     uint16_t height;
@@ -273,14 +280,39 @@ const FONT_GLYPH* font_get_glyph(const FONT* font, uint32_t codepoint);
 // followed by right.  Either may be NULL (returns 0).
 int32_t font_get_kerning(const FONT* font, const FONT_GLYPH* left, const FONT_GLYPH* right);
 
-// A glyph's bitmap: width x height bytes with stride = width
+// How far to move the pen from glyph to the next glyph, in 1/64 pixels:
+// glyph's advance plus kerning, rounded to the font's pixel grid (whole
+// pixels, or 1/subpixel pixels).  next may be NULL (no kerning).
+//
+// Rounding each step, rather than keeping an exact pen position and
+// rounding where each glyph lands, keeps the gap between two glyphs the
+// same wherever they appear.
+int32_t font_get_advance(const FONT* font, const FONT_GLYPH* glyph, const FONT_GLYPH* next);
+
+// A glyph's bitmap: width x height bytes with stride = width.  Subpixel
+// fonts have font->subpixel bitmaps one after the other; this is the first.
 const uint8_t* font_get_bitmap(const FONT* font, const FONT_GLYPH* glyph);
 
-// Width of a UTF-8 string in pixels: the sum of glyph advances plus kerning,
-// ie: how far the pen moves when drawing it.  Characters missing from the
-// font use the default glyph, or are skipped if it has none.  Invalid UTF-8
-// is treated as U+FFFD.  length is in bytes, or -1 if NUL terminated.  The
-// height of a line is font->lineHeight.
+// Draw one glyph with the pen at (x64, y): x64 in 1/64 pixels, y the
+// baseline in pixels.  Picks the bitmap nearest the pen's fractional
+// position.  For custom text layout, step x64 with font_get_advance():
+//
+//     int32_t x64 = x * 64;
+//     ...
+//     if (prev) x64 += font_get_advance(font, prev, glyph);
+//     draw_glyph(buffer, font, glyph, x64, y, color, alpha);
+void draw_glyph(IMAGE_BUFFER* buffer, const FONT* font, const FONT_GLYPH* glyph, int32_t x64, int32_t y, uint16_t color, uint8_t alpha);
+
+// Draw a UTF-8 string with its baseline starting at (x, y), with kerning.
+// Characters missing from the font use the default glyph, or are skipped if
+// it has none.  Invalid UTF-8 is treated as U+FFFD.  length is in bytes, or
+// -1 if NUL terminated.  Clipped to the buffer (use a clip view to clip to a
+// region).  Returns x plus the text's width (see font_measure_text()).
+int32_t draw_text(IMAGE_BUFFER* buffer, const FONT* font, int32_t x, int32_t y, const char* text, int32_t length, uint16_t color, uint8_t alpha);
+
+// Width of a UTF-8 string in pixels, ie: how far draw_text() moves the pen,
+// rounded to a whole pixel.  No wrapping.  The height of a line is
+// font->lineHeight.
 int32_t font_measure_text(const FONT* font, const char* text, int32_t length);
 
 #ifdef __cplusplus

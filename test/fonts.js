@@ -1,16 +1,22 @@
 import fs from "node:fs";
-import { packFontFiles } from "../encoder/font.js";
+import { packFont } from "../encoder/font.js";
 
-// Packs the test fonts.  The atlases were generated from Open Sans with:
-//
-//   msdf-atlas-gen -font OpenSans-Regular.ttf -type softmask -size 20
-//                  -pxalign on -yorigin top -chars "[0x20,0x7e],0xb0,0xe9,0x20ac"
-//                  -imageout artwork/opensans-20.png -json artwork/opensans-20.json
+// Packs the test fonts from Open Sans (Apache License 2.0, see
+// artwork/OpenSans-LICENSE.txt)
 
-for (let f of ["opensans-20"])
+const fonts = [
+    { file: "opensans-20", size: 20, subpixel: 1 },
+    { file: "opensans-20-sp4", size: 20, subpixel: 4 },
+];
+
+for (const f of fonts)
 {
-    const packed = await packFontFiles(`./artwork/${f}.json`, `./artwork/${f}.png`);
-    fs.writeFileSync(`./artwork/${f}.rfnt`, packed.data);
-    console.log(`----- ${f} -----`);
+    const packed = packFont("./artwork/OpenSans-Regular.ttf", {
+        size: f.size,
+        subpixel: f.subpixel,
+        charset: "32-126,0xB0,0xE9,0x20AC",
+    });
+    fs.writeFileSync(`./artwork/${f.file}.rfnt`, packed.data);
+    console.log(`----- ${f.file} -----`);
     console.log(packed.stats);
 }

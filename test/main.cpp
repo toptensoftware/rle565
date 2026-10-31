@@ -4,6 +4,7 @@
 #include <string.h>
 #include <malloc.h>
 #include <assert.h>
+#include <math.h>
 #pragma warning(disable: 4200)
 #include "../src/rle565.h"
 
@@ -62,28 +63,19 @@ void write_bmp(const char *filename, uint16_t *pixels, int w, int h) {
     fclose(f);
 }
 
-// Minimal text drawing for the font tests: UTF-8, pen in 1/64 pixels
-static void draw_text_test(IMAGE_BUFFER* buf, const FONT* font, int32_t x, int32_t baseline, const char* text, uint16_t color, bool kern, uint8_t alpha = 255)
+// ASCII text without kerning, for comparison with draw_text()
+static void draw_text_unkerned(IMAGE_BUFFER* buf, const FONT* font, int32_t x, int32_t baseline, const char* text, uint16_t color)
 {
-    int32_t pen = x * 64;
+    int32_t x64 = x * 64;
     const FONT_GLYPH* prev = NULL;
-    const uint8_t* p = (const uint8_t*)text;
-    while (*p)
+    for (const char* p = text; *p; p++)
     {
-        uint32_t cp = *p++;
-        int extra = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
-        cp &= extra == 3 ? 0x07 : extra == 2 ? 0x0F : extra == 1 ? 0x1F : 0x7F;
-        while (extra-- > 0 && *p)
-            cp = (cp << 6) | (*p++ & 0x3F);
-
-        const FONT_GLYPH* g = font_get_glyph(font, cp);
+        const FONT_GLYPH* g = font_get_glyph(font, (uint8_t)*p);
         if (g == NULL)
             continue;
-        if (kern)
-            pen += font_get_kerning(font, prev, g);
-        draw_alpha_mask(buf, ((pen + 32) >> 6) + g->left, baseline + g->top,
-                        font_get_bitmap(font, g), g->width, g->width, g->height, color, alpha);
-        pen += g->advance;
+        if (prev)
+            x64 += font_get_advance(font, prev, NULL);
+        draw_glyph(buf, font, g, x64, baseline, color, 255);
         prev = g;
     }
 }
@@ -710,7 +702,7 @@ int main()
         check(font_find_glyph(font, 0x65E5) == NULL && font_get_glyph(font, 0x65E5) == font_find_glyph(font, '?'),
               "24: missing glyph falls back to '?'");
 
-        // Kerning (values from the msdf-atlas-gen JSON, in 1/64 px)
+        // Kerning (Open Sans GPOS values scaled to 20px, in 1/64 px)
         const FONT_GLYPH* A = font_find_glyph(font, 'A');
         const FONT_GLYPH* V = font_find_glyph(font, 'V');
         const FONT_GLYPH* T = font_find_glyph(font, 'T');
@@ -806,63 +798,222 @@ int main()
                 const FONT_GLYPH* g = font_get_glyph(f, cp);
                 if (!g) continue;
                 const uint8_t* bm = font_get_bitmap(f, g);
-                for (uint32_t i = 0; i < (uint32_t)g->width * g->height; i++)
+                for (uint32_t i = 0; i < (uint32_t)g->width * g->height * f->subpixel; i++)
                     sink += bm[i];
                 sink += font_get_kerning(f, g, font_find_glyph(f, 'o'));
             }
+            uint16_t px[64 * 32];
+            IMAGE_BUFFER small;
+            init_image_buffer(&small, 64, 32, px, 64);
+            draw_text(&small, f, -5, 20, "AVATAR \xC3\xA9\xE2\x82\xAC\xFF Toyota", -1, 0xFFFF, 200);
         }
         check(true, "24: damaged fonts don't crash");
         free(copy);
 
         // Measuring
         {
-            auto adv = [&](const char* s) { int32_t pen = 0; const FONT_GLYPH* prev = NULL;
-                for (; *s; s++) { const FONT_GLYPH* g = font_get_glyph(font, (uint8_t)*s); pen += font_get_kerning(font, prev, g) + g->advance; prev = g; }
-                return (pen + 32) >> 6; };
+            // Expected width: each glyph's advance plus kerning, rounded per glyph
+            auto r = [](int32_t v) { return (v + 32) >> 6; };
+            auto adv = [&](const char* s) { int32_t w = 0;
+                for (; *s; s++) { const FONT_GLYPH* g = font_get_glyph(font, (uint8_t)*s);
+                    w += r(g->advance + font_get_kerning(font, g, s[1] ? font_get_glyph(font, (uint8_t)s[1]) : NULL)); }
+                return w; };
             const FONT_GLYPH* q = font_find_glyph(font, '?');
             const FONT_GLYPH* e = font_find_glyph(font, 0xE9);
             const FONT_GLYPH* euro = font_find_glyph(font, 0x20AC);
+            const FONT_GLYPH* yg = font_find_glyph(font, 'y');
 
             check(font_measure_text(font, "", -1) == 0 && font_measure_text(font, "AVATAR", 0) == 0, "24: measure empty");
             check(font_measure_text(font, "AVATAR Toyota", -1) == adv("AVATAR Toyota"), "24: measure includes kerning");
-            check(font_measure_text(font, "AV", -1) == ((A->advance + V->advance - 51 + 32) >> 6), "24: measure AV");
+            check(font_measure_text(font, "AV", -1) == r(A->advance - 51) + r(V->advance), "24: measure AV");
             check(font_measure_text(font, "AVATAR", 2) == font_measure_text(font, "AV", -1), "24: measure with length");
-            check(font_measure_text(font, "\xC3\xA9\xE2\x82\xAC", -1) == ((e->advance + euro->advance + 32) >> 6), "24: measure UTF-8");
-            check(font_measure_text(font, "\xE6\x97\xA5", -1) == ((q->advance + 32) >> 6), "24: measure missing char uses default");
+
+            // Steps round per glyph: in "Toyota", T->o is 11.06 - 1.39 = 10,
+            // o->y is 12.08 - 0.41 = 12 and y->o is 10.08 = 10
+            check(font_get_advance(font, T, o) == 10 * 64 && font_get_advance(font, o, yg) == 12 * 64 && font_get_advance(font, yg, o) == 10 * 64,
+                  "24: advances round per step");
+            check(font_get_advance(font, o, NULL) == r(o->advance) * 64, "24: advance without next glyph");
+            check(font_measure_text(font, "Toyota", -1) == adv("Toyota"), "24: measure matches per step rounding");
+
+            check(font_measure_text(font, "\xC3\xA9\xE2\x82\xAC", -1) == r(e->advance + font_get_kerning(font, e, euro)) + r(euro->advance), "24: measure UTF-8");
+            check(font_measure_text(font, "\xE6\x97\xA5", -1) == r(q->advance), "24: measure missing char uses default");
 
             // Invalid UTF-8 measures as U+FFFD, which this font draws as '?'
-            int32_t one = (q->advance + 32) >> 6;
+            int32_t one = r(q->advance);
             check(font_measure_text(font, "\xFF", -1) == one, "24: measure invalid byte");
             check(font_measure_text(font, "\xE2\x82", -1) == one, "24: measure truncated sequence");
             check(font_measure_text(font, "\xC0\xAF", -1) == one, "24: measure overlong sequence");
             check(font_measure_text(font, "\xED\xA0\x80", -1) == one, "24: measure surrogate");
-            check(font_measure_text(font, "\xE2\x82" "A", -1) == ((q->advance + A->advance + 32) >> 6), "24: measure resyncs after bad sequence");
+            check(font_measure_text(font, "\xE2\x82" "A", -1) == font_get_advance(font, q, A) / 64 + r(A->advance), "24: measure resyncs after bad sequence");
+        }
+
+        // draw_text matches stepping draw_glyph by hand, and returns the end x
+        {
+            const uint32_t W = 300, H = 30;
+            uint16_t* m1 = (uint16_t*)calloc(W * H, sizeof(uint16_t));
+            uint16_t* m2 = (uint16_t*)calloc(W * H, sizeof(uint16_t));
+            IMAGE_BUFFER b1, b2;
+            init_image_buffer(&b1, W, H, m1, W);
+            init_image_buffer(&b2, W, H, m2, W);
+            const char* text = "AVATAR Toyota";
+            int32_t end = draw_text(&b1, font, 5, 22, text, -1, 0xFFFF, 255);
+            int32_t x64 = 5 * 64;
+            const FONT_GLYPH* prev = NULL;
+            for (const char* p = text; *p; p++)
+            {
+                const FONT_GLYPH* g = font_find_glyph(font, (uint8_t)*p);
+                if (prev) x64 += font_get_advance(font, prev, g);
+                draw_glyph(&b2, font, g, x64, 22, 0xFFFF, 255);
+                prev = g;
+            }
+            check(memcmp(m1, m2, W * H * sizeof(uint16_t)) == 0, "24: draw_text matches draw_glyph steps");
+            check(end == 5 + font_measure_text(font, text, -1), "24: draw_text returns end x");
+            free(m1);
+            free(m2);
+        }
+
+        // Subpixel positioned font
+        {
+            size_t size4;
+            uint8_t* data4 = (uint8_t*)read_bin("./artwork/opensans-20-sp4.rfnt", &size4);
+            const FONT* font4 = (const FONT*)data4;
+            check(check_font(font4, size4) && font4->subpixel == 4 && font->subpixel == 1, "24: subpixel font is valid");
+
+            // Variant 0 is the same rendering as the whole pixel font, just
+            // padded to the size of all the variants
+            const FONT_GLYPH* glyphs4 = (const FONT_GLYPH*)(data4 + font4->glyphsOffset);
+            bool sameRender = font4->glyphCount == font->glyphCount;
+            bool areasMatch = true;
+            for (uint32_t i = 0; sameRender && i < font->glyphCount; i++)
+            {
+                const FONT_GLYPH* g1 = &glyphs[i];
+                const FONT_GLYPH* g4 = &glyphs4[i];
+                if (g1->codepoint != g4->codepoint || g1->advance != g4->advance || g1->kerningCount != g4->kerningCount)
+                    sameRender = false;
+                if (g1->width == 0)
+                    continue;
+                const uint8_t* b1 = font_get_bitmap(font, g1);
+                const uint8_t* b4 = font_get_bitmap(font4, g4);
+                for (int32_t y = 0; y < g4->height; y++)
+                    for (int32_t x = 0; x < g4->width; x++)
+                    {
+                        int32_t x1 = g4->left + x - g1->left, y1 = g4->top + y - g1->top;
+                        uint8_t expect = (x1 >= 0 && y1 >= 0 && x1 < g1->width && y1 < g1->height) ? b1[y1 * g1->width + x1] : 0;
+                        if (b4[y * g4->width + x] != expect)
+                            sameRender = false;
+                    }
+
+                // Each shifted variant covers about the same area
+                uint32_t n = g4->width * g4->height;
+                double area0 = 0;
+                for (uint32_t v = 0; v < 4; v++)
+                {
+                    double area = 0;
+                    for (uint32_t k = 0; k < n; k++)
+                        area += b4[v * n + k];
+                    if (v == 0)
+                        area0 = area;
+                    else if (area0 > 255 * 20 && fabs(area - area0) > area0 * 0.02)
+                        areasMatch = false;
+                }
+            }
+            check(sameRender, "24: subpixel variant 0 matches whole pixel render");
+            check(areasMatch, "24: subpixel variants cover the same area");
+
+            // Advances snap to quarter pixels
+            bool quarters = true;
+            for (uint32_t i = 0; i < font4->glyphCount; i++)
+                for (uint32_t j = 0; j < font4->glyphCount; j += 7)
+                {
+                    int32_t a = font_get_advance(font4, &glyphs4[i], &glyphs4[j]);
+                    int32_t exact = glyphs4[i].advance + font_get_kerning(font4, &glyphs4[i], &glyphs4[j]);
+                    if (a % 16 != 0 || abs(a - exact) > 8)
+                        quarters = false;
+                }
+            const FONT_GLYPH* T4 = font_find_glyph(font4, 'T');
+            const FONT_GLYPH* o4 = font_find_glyph(font4, 'o');
+            check(quarters && font_get_advance(font4, T4, o4) == 624, "24: subpixel advances snap to 1/4 pixel");
+
+            // draw_glyph picks the variant nearest the pen position
+            const uint32_t W = 40, H = 30;
+            uint16_t m1[W * H], m2[W * H];
+            IMAGE_BUFFER b1, b2;
+            init_image_buffer(&b1, W, H, m1, W);
+            init_image_buffer(&b2, W, H, m2, W);
+            struct { int32_t x64; int32_t x; uint32_t variant; } picks[] = {
+                { 10 * 64, 10, 0 },
+                { 10 * 64 + 16, 10, 1 },
+                { 10 * 64 + 40, 10, 3 },        // 0.625 rounds to 0.75
+                { 10 * 64 + 56, 11, 0 },        // 0.875 rounds up to the next pixel
+                { -3 * 64 + 32, -3, 2 },        // negative, partly clipped
+            };
+            bool picksOk = true;
+            uint32_t n = o4->width * o4->height;
+            for (auto& p : picks)
+            {
+                memset(m1, 0, sizeof(m1));
+                memset(m2, 0, sizeof(m2));
+                draw_glyph(&b1, font4, o4, p.x64, 20, 0xFFFF, 255);
+                draw_alpha_mask(&b2, p.x + o4->left, 20 + o4->top, font_get_bitmap(font4, o4) + p.variant * n,
+                                o4->width, o4->width, o4->height, 0xFFFF, 255);
+                if (memcmp(m1, m2, sizeof(m1)) != 0)
+                    picksOk = false;
+            }
+            check(picksOk, "24: draw_glyph picks the nearest subpixel bitmap");
+
+            int32_t pen = 0;
+            const char* text = "AVATAR Toyota";
+            for (const char* p = text; *p; p++)
+                pen += font_get_advance(font4, font_find_glyph(font4, (uint8_t)*p), p[1] ? font_find_glyph(font4, (uint8_t)p[1]) : NULL);
+            check(font_measure_text(font4, text, -1) == (pen + 32) / 64, "24: subpixel measure");
+
+            // Damaged subpixel settings
+            uint8_t* copy4 = (uint8_t*)malloc(size4);
+            memcpy(copy4, data4, size4);
+            ((FONT*)copy4)->subpixel = 3;
+            check(!check_font(copy4, size4), "24: bad subpixel count rejected");
+            free(copy4);
+            copy4 = (uint8_t*)malloc(size);
+            memcpy(copy4, data, size);
+            ((FONT*)copy4)->subpixel = 8;
+            check(!check_font(copy4, size), "24: subpixel bitmaps beyond data rejected");
+            free(copy4);
+
+            free(data4);
         }
 
         // Render some text to look at
-        const uint32_t W = 420, H = 220;
+        size_t size4;
+        uint8_t* data4 = (uint8_t*)read_bin("./artwork/opensans-20-sp4.rfnt", &size4);
+        const FONT* font4 = (const FONT*)data4;
+
+        const uint32_t W = 440, H = 270;
         uint16_t* mem = (uint16_t*)malloc(W * H * sizeof(uint16_t));
         IMAGE_BUFFER buf;
         init_image_buffer(&buf, W, H, mem, W);
         fill_rect(&buf, 0, 0, W, H, 0xFFFF);
-        fill_rect(&buf, 0, 150, W, H - 150, 0x18E3);
+        fill_rect(&buf, 0, 200, W, H - 200, 0x18E3);
 
         const uint32_t lh = font->lineHeight;
         int32_t y = font->ascent + 4;
-        draw_text_test(&buf, font, 8, y, "AVATAR Toyota Wave. (kerned)", 0x0000, true);
-        fill_rect(&buf, 8, y + 2, font_measure_text(font, "AVATAR Toyota Wave. (kerned)", -1), 1, 0x07E0);   y += lh;
-        draw_text_test(&buf, font, 8, y, "AVATAR Toyota Wave. (not kerned)", 0x0000, false); y += lh;
-        draw_text_test(&buf, font, 8, y, "The quick brown fox jumps over the lazy dog", 0x001F, true); y += lh;
-        draw_text_test(&buf, font, 8, y, "Caf\xC3\xA9 \xE2\x82\xAC" "12 21\xC2\xB0 missing:\xE6\x97\xA5", 0xF800, true); y += lh;
-        draw_text_test(&buf, font, 8, y, "Faded text at alpha 96", 0x0000, true, 96);
+        const char* sample = "AVATAR Toyota Wave. (kerned)";
+        draw_text(&buf, font, 8, y, sample, -1, 0x0000, 255);
+        fill_rect(&buf, 8, y + 2, font_measure_text(font, sample, -1), 1, 0x07E0);   y += lh;
+        draw_text_unkerned(&buf, font, 8, y, "AVATAR Toyota Wave. (not kerned)", 0x0000); y += lh;
+        draw_text(&buf, font4, 8, y, "AVATAR Toyota Wave. (subpixel x4)", -1, 0x0000, 255); y += lh;
+        draw_text(&buf, font, 8, y, "The quick brown fox jumps over the lazy dog", -1, 0x001F, 255); y += lh;
+        draw_text(&buf, font4, 8, y, "The quick brown fox jumps over the lazy dog", -1, 0x001F, 255); y += lh;
+        draw_text(&buf, font, 8, y, "Caf\xC3\xA9 \xE2\x82\xAC" "12 21\xC2\xB0 missing:\xE6\x97\xA5", -1, 0xF800, 255); y += lh;
+        draw_text(&buf, font, 8, y, "Faded text at alpha 96", -1, 0x0000, 96);
 
         // Clipped: a view across the middle of a line, and text on dark
         IMAGE_BUFFER view;
-        clip_image_buffer(&view, &buf, 60, 160, 200, 14);
+        clip_image_buffer(&view, &buf, 60, 210, 200, 14);
         fill_rect(&view, 0, 0, 200, 14, 0x4208);
-        draw_text_test(&view, font, -20, 14, "Clipped to a view on all sides!", 0xFFE0, true);
-        draw_text_test(&buf, font, 8, 210, "Light on dark 0123456789", 0xFFFF, true);
+        draw_text(&view, font, -20, 14, "Clipped to a view on all sides!", -1, 0xFFE0, 255);
+        draw_text(&buf, font, 8, 260, "Light on dark 0123456789", -1, 0xFFFF, 255);
         write_bmp("build/font.bmp", mem, W, H);
+        free(data4);
         free(mem);
         free(data);
     }

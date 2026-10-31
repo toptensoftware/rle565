@@ -16,6 +16,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "fontkit": "^2.0.4",
     "sharp": "^0.34.5"
   }
 }

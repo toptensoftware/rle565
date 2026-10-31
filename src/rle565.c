@@ -819,14 +819,16 @@ bool check_font(const void* font_data, size_t size)
         return false;
     if (font->defaultGlyph != FONT_NO_GLYPH && font->defaultGlyph >= font->glyphCount)
         return false;
+    if (font->subpixel != 1 && font->subpixel != 2 && font->subpixel != 4 && font->subpixel != 8)
+        return false;
 
-    // Glyph bitmaps and kerning ranges
+    // Glyph bitmaps (one per subpixel position) and kerning ranges
     uint64_t bitmapBytes = packed - font->bitmapsOffset;
     const FONT_GLYPH* glyphs = font_glyphs(font);
     for (uint32_t i = 0; i < font->glyphCount; i++)
     {
         const FONT_GLYPH* g = &glyphs[i];
-        if (g->bitmap + (uint64_t)g->width * g->height > bitmapBytes)
+        if (g->bitmap + (uint64_t)g->width * g->height * font->subpixel > bitmapBytes)
             return false;
         if ((uint64_t)g->kerning + g->kerningCount > font->kerningCount)
             return false;
@@ -945,7 +947,38 @@ static uint32_t utf8_decode(const uint8_t** pp, const uint8_t* end)
     return c;
 }
 
-int32_t font_measure_text(const FONT* font, const char* text, int32_t length)
+// Divide rounding towards negative infinity (b > 0)
+static inline int64_t floor_div(int64_t a, int64_t b)
+{
+    int64_t q = a / b;
+    return (a % b != 0 && a < 0) ? q - 1 : q;
+}
+
+int32_t font_get_advance(const FONT* font, const FONT_GLYPH* glyph, const FONT_GLYPH* next)
+{
+    // Round to the nearest step of the font's grid (halves up)
+    int32_t unit = 64 / font->subpixel;
+    int32_t v = (int32_t)glyph->advance + font_get_kerning(font, glyph, next);
+    return (int32_t)floor_div(v + unit / 2, unit) * unit;
+}
+
+void draw_glyph(IMAGE_BUFFER* buffer, const FONT* font, const FONT_GLYPH* glyph, int32_t x64, int32_t y, uint16_t color, uint8_t alpha)
+{
+    if (glyph->width == 0)
+        return;
+
+    // Nearest subpixel position, split into whole pixels and bitmap index
+    int64_t q = floor_div((int64_t)x64 * font->subpixel + 32, 64);
+    int64_t x = floor_div(q, font->subpixel);
+    uint32_t variant = (uint32_t)(q - x * font->subpixel);
+
+    const uint8_t* bitmap = font_get_bitmap(font, glyph) + (size_t)variant * glyph->width * glyph->height;
+    draw_alpha_mask(buffer, (int32_t)(x + glyph->left), y + glyph->top, bitmap, glyph->width, glyph->width, glyph->height, color, alpha);
+}
+
+// Lay out a UTF-8 string from pen position 0, drawing each glyph if buffer
+// isn't NULL.  Returns the pen position after the text in 1/64 pixels.
+static int32_t layout_text(IMAGE_BUFFER* buffer, const FONT* font, int32_t x, int32_t y, const char* text, int32_t length, uint16_t color, uint8_t alpha)
 {
     assert(font->signature == FONT_SIGNATURE);
 
@@ -959,10 +992,25 @@ int32_t font_measure_text(const FONT* font, const char* text, int32_t length)
         const FONT_GLYPH* glyph = font_get_glyph(font, utf8_decode(&p, end));
         if (glyph == nullptr)
             continue;
-        pen += font_get_kerning(font, prev, glyph) + glyph->advance;
+        if (prev != nullptr)
+            pen += font_get_advance(font, prev, glyph);
+        if (buffer != nullptr)
+            draw_glyph(buffer, font, glyph, x * 64 + pen, y, color, alpha);
         prev = glyph;
     }
+    if (prev != nullptr)
+        pen += font_get_advance(font, prev, nullptr);
+    return pen;
+}
 
-    // Round from 1/64 pixels (floor division so negative widths round too)
-    return (pen + 32) >> 6;
+int32_t draw_text(IMAGE_BUFFER* buffer, const FONT* font, int32_t x, int32_t y, const char* text, int32_t length, uint16_t color, uint8_t alpha)
+{
+    if (alpha == 0)
+        return x + font_measure_text(font, text, length);
+    return x + (int32_t)floor_div(layout_text(buffer, font, x, y, text, length, color, alpha) + 32, 64);
+}
+
+int32_t font_measure_text(const FONT* font, const char* text, int32_t length)
+{
+    return (int32_t)floor_div(layout_text(nullptr, font, 0, 0, text, length, 0, 0) + 32, 64);
 }

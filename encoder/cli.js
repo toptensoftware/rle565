@@ -4,15 +4,17 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { packRle, packPalette, PaletteBuilder } from "./pack.js";
 import { unpackRleToPng, readPalette } from "./unpack.js";
-import { packFontFiles } from "./font.js";
+import { packFont, parseCharset, FONT_SUBPIXEL_VALUES } from "./font.js";
+
+const FONT_EXTENSIONS = [".ttf", ".otf", ".woff", ".woff2", ".ttc", ".otc"];
 
 const HELP = `Usage: rle565 [options] <input...>
 
 Encodes PNG images to the rle565 run length encoded RGB565 format,
-decodes .rle565 images back to PNG, and packs fonts rendered by
-msdf-atlas-gen.  Each input is converted based on its extension: .rle565
-files are decoded, .json files (msdf-atlas-gen layouts) are packed as
-fonts, and anything else is encoded as an image.
+decodes .rle565 images back to PNG, and packs fonts.  Each input is
+converted based on its extension: .rle565 files are decoded, font files
+(.ttf, .otf, .woff, .woff2) are packed to .rfnt, and anything else is
+encoded as an image.
 
 Options:
   -o, --output <file>          Output file (single input only).
@@ -38,14 +40,17 @@ Decoding options:
                                images encoded with a shared palette.
 
 Font options:
-  -A, --atlas <file>           Atlas image for a .json font layout (single
-                               font only). Default: <input-name>.png
+  -s, --size <px>              Font size in pixels per em. Required for fonts.
+  -c, --chars <ranges>         Characters to include, as codepoints and
+                               ranges in decimal, 0x hex or U+ hex, eg:
+                               "32-126,0xB0,U+20AC". Default: 32-126 (ASCII).
+      --subpixel <n>           Render each glyph at n horizontal positions
+                               per pixel (2, 4 or 8) for more accurate
+                               spacing. Multiplies glyph bitmap size by n.
+                               Default: 1 (whole pixels).
+      --no-kerning             Leave out kerning.
   -D, --default-char <char>    Character drawn for characters missing from
                                the font. Default: U+FFFD or '?' if present.
-
-  Generate fonts with msdf-atlas-gen, eg:
-    msdf-atlas-gen -font MyFont.ttf -size 20 -type softmask -pxalign on
-                   -imageout myfont.png -json myfont.json
 
 General:
   -v, --verbose                Print encoding statistics.
@@ -110,7 +115,10 @@ try
             "alpha-rect":     { type: "string",  short: "a", multiple: true },
             "shared-palette": { type: "string",  short: "p" },
             "palette":        { type: "string",  short: "P" },
-            "atlas":          { type: "string",  short: "A" },
+            "size":           { type: "string",  short: "s" },
+            "chars":          { type: "string",  short: "c" },
+            "subpixel":       { type: "string" },
+            "no-kerning":     { type: "boolean" },
             "default-char":   { type: "string",  short: "D" },
             "verbose":        { type: "boolean", short: "v" },
             "help":           { type: "boolean", short: "h" },
@@ -140,8 +148,6 @@ for (const input of inputs)
     if (!fs.existsSync(input))
         fail(`input file '${input}' not found`);
 }
-if (opts.atlas && inputs.filter(isFontLayout).length > 1)
-    fail("--atlas can only be used with a single font");
 if (opts.palette && !fs.existsSync(opts.palette))
     fail(`palette file '${opts.palette}' not found`);
 
@@ -156,23 +162,55 @@ function isRle565(file)
     return path.extname(file).toLowerCase() == ".rle565";
 }
 
-function isFontLayout(file)
+function isFont(file)
 {
-    return path.extname(file).toLowerCase() == ".json";
+    return FONT_EXTENSIONS.includes(path.extname(file).toLowerCase());
 }
 
 function outputFor(input)
 {
     if (opts.output)
         return inOutdir(opts.output);
-    const ext = isRle565(input) ? ".png" : isFontLayout(input) ? ".rfnt" : ".rle565";
+    const ext = isRle565(input) ? ".png" : isFont(input) ? ".rfnt" : ".rle565";
     const name = path.basename(input, path.extname(input)) + ext;
     return path.join(opts.outdir ?? path.dirname(input), name);
 }
 
-const encodeInputs = inputs.filter(f => !isRle565(f) && !isFontLayout(f));
+const encodeInputs = inputs.filter(f => !isRle565(f) && !isFont(f));
 if (opts["shared-palette"] && encodeInputs.length == 0)
     fail("--shared-palette needs at least one image to encode");
+
+// Font options
+const fontOptions = {};
+if (inputs.some(isFont))
+{
+    if (opts.size == null)
+        fail("--size is required for fonts");
+    fontOptions.size = Number(opts.size);
+    if (!(fontOptions.size > 0 && fontOptions.size <= 1000))
+        fail(`invalid --size '${opts.size}'`);
+
+    fontOptions.subpixel = opts.subpixel != null ? Number(opts.subpixel) : 1;
+    if (!FONT_SUBPIXEL_VALUES.includes(fontOptions.subpixel))
+        fail(`invalid --subpixel '${opts.subpixel}', expected ${FONT_SUBPIXEL_VALUES.join(", ")}`);
+
+    try
+    {
+        fontOptions.charset = parseCharset(opts.chars ?? "32-126");
+    }
+    catch (err)
+    {
+        fail(err.message);
+    }
+    fontOptions.kerning = !opts["no-kerning"];
+    fontOptions.defaultChar = opts["default-char"];
+}
+
+function formatCodepoints(cps)
+{
+    const list = cps.slice(0, 10).map(cp => "U+" + cp.toString(16).toUpperCase().padStart(4, "0")).join(", ");
+    return cps.length > 10 ? `${list} and ${cps.length - 10} more` : list;
+}
 
 const packOptions = {
     background: opts.background != null ? parseBackground(opts.background) : null,
@@ -221,16 +259,12 @@ try
             continue;
         }
 
-        if (isFontLayout(input))
+        if (isFont(input))
         {
-            const atlas = opts.atlas ?? path.join(path.dirname(input), path.basename(input, path.extname(input)) + ".png");
-            if (!fs.existsSync(atlas))
-                throw new Error(`${input}: atlas image '${atlas}' not found (use --atlas)`);
-
             let font;
             try
             {
-                font = await packFontFiles(input, atlas, { defaultChar: opts["default-char"] });
+                font = packFont(input, fontOptions);
             }
             catch (err)
             {
@@ -243,7 +277,8 @@ try
             {
                 console.log([
                     `${output}`,
-                    `  size:     ${st.size}px, ${st.glyphs} glyphs, ${st.kerningPairs} kerning pairs`,
+                    `  font:     ${st.name}, ${st.size}px${st.subpixel > 1 ? `, ${st.subpixel} subpixel positions` : ""}`,
+                    `  glyphs:   ${st.glyphs}, ${st.kerningPairs} kerning pairs`,
                     `  bitmaps:  ${st.bitmapBytes} bytes (${st.sharedBitmaps} shared)`,
                     `  hash:     ${st.hashSlots} slots, longest probe ${st.maxProbe}`,
                     `  packed:   ${st.packedSize} bytes`,
@@ -253,8 +288,8 @@ try
             {
                 console.log(`${output} (${st.glyphs} glyphs, ${st.packedSize} bytes)`);
             }
-            if (st.unaligned)
-                console.warn(`warning: ${st.unaligned} glyphs weren't pixel aligned and were rounded; use msdf-atlas-gen -pxalign on`);
+            if (st.missing.length)
+                console.warn(`warning: ${st.missing.length} characters aren't in the font: ${formatCodepoints(st.missing)}`);
             continue;
         }
 
