@@ -385,6 +385,7 @@ drawing format. Converting there and back leaves a palette unchanged.
 | `get_image_packed_size(image)` | Total encoded size in bytes |
 | `get_capture_size(image)` | Capture buffer size needed for this image |
 | `get_image_palette(image)` | The image's own palette, or `NULL` for shared palette images |
+| `fill_rect(buffer, x, y, width, height, color)` | Fills a rectangle of a buffer with an RGB565 color, clipped to the buffer |
 | `check_image_header(image, size)` | Validates the header, row table and palette against the available bytes. Use before trusting data from an untrusted source |
 | `decode_image_argb8888(...)` | Decodes a whole image to ARGB8888 (see below) |
 | `premultiply_argb8888(c)`, `unpremultiply_argb8888(c)` | Alpha conversion for single colors |

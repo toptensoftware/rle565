@@ -195,6 +195,32 @@ void clip_image_buffer(IMAGE_BUFFER* buffer, IMAGE_BUFFER* underlying, uint32_t 
     buffer->base.height = height;
 }
 
+void fill_rect(IMAGE_BUFFER* buffer, int32_t x, int32_t y, uint32_t width, uint32_t height, uint16_t color)
+{
+    assert(buffer->base.signature == IMAGE_SIGNATURE);
+    assert(buffer->base.format == IMAGE_FORMAT_BUFFER);
+
+    // Clip to the buffer, in 64-bit signed so nothing can wrap
+    int64_t x0 = x;
+    int64_t y0 = y;
+    int64_t x1 = x0 + width;
+    int64_t y1 = y0 + height;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int64_t)buffer->base.width) x1 = buffer->base.width;
+    if (y1 > (int64_t)buffer->base.height) y1 = buffer->base.height;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+
+    uint32_t w = (uint32_t)(x1 - x0);
+    uint16_t* row = buffer->buffer + (size_t)y0 * buffer->stride + (size_t)x0;
+    for (int64_t r = y0; r < y1; r++, row += buffer->stride)
+    {
+        for (uint32_t i = 0; i < w; i++)
+            row[i] = color;
+    }
+}
+
 #pragma pack(push, 1)
 
 typedef struct

@@ -144,6 +144,10 @@ bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* 
 void init_image_buffer(IMAGE_BUFFER* buffer, uint32_t width, uint32_t height, uint16_t* mem, uint32_t stride);
 void clip_image_buffer(IMAGE_BUFFER* buffer, IMAGE_BUFFER* underlying, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 
+// Fill a rectangle of a buffer with an RGB565 color.  The rectangle is
+// clipped to the buffer, so it may be partly or entirely off-buffer.
+void fill_rect(IMAGE_BUFFER* buffer, int32_t x, int32_t y, uint32_t width, uint32_t height, uint16_t color);
+
 // Palette manipulation
 // Normalize a palette to ARGB8888 format, converting any opaque 
 // RGB565 entries to RGB888

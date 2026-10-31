@@ -486,6 +486,61 @@ int main()
         check(premulOk, "21: premultiply matches encoder");
     }
 
+    // 22: fill_rect clips to the buffer (and to clip views)
+    {
+        const uint32_t W = 20, H = 15, STRIDE = 24;
+        const uint16_t BG = 0x1234, FG = 0xF81F;
+        uint16_t mem[STRIDE * H];
+
+        // Fill a buffer with BG, fill_rect with FG, then compare against
+        // a rectangle intersected by hand. Padding past W must stay untouched.
+        struct { int32_t x, y; uint32_t w, h; } cases[] = {
+            { 3, 4, 5, 6 },                     // inside
+            { -5, -3, 10, 8 },                  // off top left
+            { 15, 10, 100, 100 },               // off bottom right
+            { -100, -100, 1000, 1000 },         // covers everything
+            { 25, 2, 5, 5 },                    // entirely right
+            { 2, -20, 5, 5 },                   // entirely above
+            { 3, 3, 0, 5 },                     // empty
+            { INT32_MAX, INT32_MAX, UINT32_MAX, UINT32_MAX },   // would wrap in 32-bit
+            { INT32_MIN, 0, UINT32_MAX, 1 },    // spans the whole row
+        };
+        bool ok = true;
+        for (auto& c : cases)
+        {
+            for (auto& p : mem) p = BG;
+            IMAGE_BUFFER buf;
+            init_image_buffer(&buf, W, H, mem, STRIDE);
+            fill_rect(&buf, c.x, c.y, c.w, c.h, FG);
+
+            int64_t x0 = c.x, y0 = c.y, x1 = x0 + c.w, y1 = y0 + c.h;
+            for (uint32_t y = 0; y < H; y++)
+                for (uint32_t x = 0; x < STRIDE; x++)
+                {
+                    bool in = x < W && x >= x0 && x < x1 && y >= y0 && y < y1;
+                    if (mem[y * STRIDE + x] != (in ? FG : BG))
+                        ok = false;
+                }
+        }
+        check(ok, "22: fill_rect clips to buffer");
+
+        // Through a clip view, only the view's rectangle is touched
+        for (auto& p : mem) p = BG;
+        IMAGE_BUFFER buf, view;
+        init_image_buffer(&buf, W, H, mem, STRIDE);
+        clip_image_buffer(&view, &buf, 4, 5, 6, 3);
+        fill_rect(&view, -10, -10, 100, 100, FG);
+        bool viewOk = true;
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < STRIDE; x++)
+            {
+                bool in = x >= 4 && x < 10 && y >= 5 && y < 8;
+                if (mem[y * STRIDE + x] != (in ? FG : BG))
+                    viewOk = false;
+            }
+        check(viewOk, "22: fill_rect clips to clip view");
+    }
+
     printf(failures ? "\n%d FAILED\n" : "\nAll checks passed\n", failures);
     return failures ? 1 : 0;
 }
