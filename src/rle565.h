@@ -117,6 +117,24 @@ uint32_t get_image_height(const void* image);
 void draw_image(IMAGE_BUFFER* buffer, const void* image, int32_t dest_x, int32_t dest_y, int32_t src_x, int32_t src_y, uint32_t width, uint32_t height, void* cap, uint8_t alpha, const PALETTE* palette);
 void restore_image(IMAGE_BUFFER* buffer, const void* capture);
 
+// Draw an 8-bit alpha mask (eg: a font glyph) in a solid RGB565 color.
+//
+//   buffer          destination buffer or clip view
+//   dest_x, dest_y  where the mask's top left corner lands (may be negative)
+//   mask            8-bit coverage values: 0 = transparent, 255 = solid
+//   mask_stride     bytes from one mask row to the next
+//   width, height   size of the mask
+//   color           RGB565 color to draw
+//   alpha           overall opacity, 0-255 (255 = mask coverage only)
+//
+// Clipped to the buffer.  To draw part of a mask, offset the mask pointer
+// and reduce width/height.  Optimized for speed: coverage is blended at 33
+// levels, so partially covered pixels can be off by up to 1.5 RGB565 steps.
+void draw_alpha_mask(IMAGE_BUFFER* buffer, int32_t dest_x, int32_t dest_y,
+                     const uint8_t* mask, uint32_t mask_stride,
+                     uint32_t width, uint32_t height,
+                     uint16_t color, uint8_t alpha);
+
 // Validation
 // Check that image_size bytes at image hold a well formed RLE image header:
 // signature, format, row table and (if present) palette all fit, and the
@@ -161,6 +179,109 @@ void prepare_palette(PALETTE* palette);
 // to interpolate between two new colors.  channelShift is the 
 // bit shift to get the channel to use for interpolation.
 void recolor_palette(PALETTE* palette, uint32_t colorA, uint32_t colorB, int channelShift);
+
+
+// ---------------------------------------------------------------------------
+// Fonts
+//
+// A packed font is one font at one size, pre-rasterized to 8-bit coverage
+// bitmaps that can be drawn with draw_alpha_mask().  Built from
+// msdf-atlas-gen output by encoder/font.js.  All values are little endian
+// and the blob must be 4-byte aligned:
+//
+//   FONT            header
+//   FONT_GLYPH[]    glyphCount glyphs, sorted by codepoint
+//   FONT_KERNING[]  kerningCount pairs, grouped by left glyph
+//   uint16_t[]      hash table (1 << hashBits slots) of glyph indexes
+//   uint8_t[]       glyph bitmaps
+//
+// Positions are in pixels with y down, relative to the pen position on the
+// baseline.  Advances and kerning are in 1/64 pixels.
+//
+// The hash table maps codepoints to glyph indexes with linear probing:
+// start at slot (codepoint * 0x9E3779B1) >> (32 - hashBits) and step
+// forward (wrapping) until the glyph's codepoint matches or an empty slot
+// (FONT_NO_GLYPH) is found.  It's at most half full.
+
+#define FONT_SIGNATURE      0x544E4652      // "RFNT" (little endian)
+#define FONT_VERSION        1
+#define FONT_NO_GLYPH       0xFFFF
+
+typedef struct FONT FONT;
+typedef struct FONT_GLYPH FONT_GLYPH;
+typedef struct FONT_KERNING FONT_KERNING;
+
+#pragma pack(push, 1)
+
+struct FONT                         // 52 bytes
+{
+    uint32_t signature;             // FONT_SIGNATURE
+    uint16_t version;               // FONT_VERSION
+    uint16_t flags;                 // 0, reserved
+    uint32_t packedSize;            // total size of the font data
+    uint16_t size;                  // pixels per em it was rendered at
+    uint16_t lineHeight;            // baseline to baseline
+    uint16_t ascent;                // pixels above the baseline
+    uint16_t descent;               // pixels below the baseline
+    int16_t  underlineY;            // top of underline relative to baseline (+ve = below)
+    uint16_t underlineThickness;
+    uint16_t glyphCount;
+    uint16_t defaultGlyph;          // glyph for missing characters, or FONT_NO_GLYPH
+    uint16_t hashBits;              // hash table has 1 << hashBits slots
+    uint16_t reserved;
+    uint32_t kerningCount;          // total kerning pairs
+    uint32_t glyphsOffset;          // offsets from start of font
+    uint32_t kerningOffset;
+    uint32_t hashOffset;
+    uint32_t bitmapsOffset;
+};
+
+struct FONT_GLYPH                   // 24 bytes
+{
+    uint32_t codepoint;             // Unicode codepoint
+    uint32_t bitmap;                // offset of bitmap from bitmapsOffset
+    uint32_t kerning;               // index of first kerning pair with this glyph on the left
+    uint16_t width;                 // bitmap size, stride = width.  0 for blank glyphs
+    uint16_t height;
+    int16_t  left;                  // bitmap's top left relative to the pen
+    int16_t  top;
+    uint16_t advance;               // pen advance in 1/64 pixels
+    uint16_t kerningCount;          // kerning pairs with this glyph on the left
+};
+
+struct FONT_KERNING                 // 4 bytes
+{
+    uint16_t right;                 // index of the right glyph (sorted)
+    int16_t  adjust;                // advance adjustment in 1/64 pixels
+};
+
+#pragma pack(pop)
+
+// Check that size bytes at font hold a well formed font: header, every
+// offset, glyph bitmap, kerning pair and hash table entry are checked.  Use
+// before trusting a font from an untrusted source.
+bool check_font(const void* font, size_t size);
+
+// Find the glyph for a codepoint, or NULL if the font doesn't have one
+const FONT_GLYPH* font_find_glyph(const FONT* font, uint32_t codepoint);
+
+// As font_find_glyph() but falls back to the font's default glyph (which
+// may also be NULL)
+const FONT_GLYPH* font_get_glyph(const FONT* font, uint32_t codepoint);
+
+// Kerning adjustment in 1/64 pixels to add to left's advance when it's
+// followed by right.  Either may be NULL (returns 0).
+int32_t font_get_kerning(const FONT* font, const FONT_GLYPH* left, const FONT_GLYPH* right);
+
+// A glyph's bitmap: width x height bytes with stride = width
+const uint8_t* font_get_bitmap(const FONT* font, const FONT_GLYPH* glyph);
+
+// Width of a UTF-8 string in pixels: the sum of glyph advances plus kerning,
+// ie: how far the pen moves when drawing it.  Characters missing from the
+// font use the default glyph, or are skipped if it has none.  Invalid UTF-8
+// is treated as U+FFFD.  length is in bytes, or -1 if NUL terminated.  The
+// height of a line is font->lineHeight.
+int32_t font_measure_text(const FONT* font, const char* text, int32_t length);
 
 #ifdef __cplusplus
 }

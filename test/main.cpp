@@ -62,6 +62,32 @@ void write_bmp(const char *filename, uint16_t *pixels, int w, int h) {
     fclose(f);
 }
 
+// Minimal text drawing for the font tests: UTF-8, pen in 1/64 pixels
+static void draw_text_test(IMAGE_BUFFER* buf, const FONT* font, int32_t x, int32_t baseline, const char* text, uint16_t color, bool kern, uint8_t alpha = 255)
+{
+    int32_t pen = x * 64;
+    const FONT_GLYPH* prev = NULL;
+    const uint8_t* p = (const uint8_t*)text;
+    while (*p)
+    {
+        uint32_t cp = *p++;
+        int extra = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+        cp &= extra == 3 ? 0x07 : extra == 2 ? 0x0F : extra == 1 ? 0x1F : 0x7F;
+        while (extra-- > 0 && *p)
+            cp = (cp << 6) | (*p++ & 0x3F);
+
+        const FONT_GLYPH* g = font_get_glyph(font, cp);
+        if (g == NULL)
+            continue;
+        if (kern)
+            pen += font_get_kerning(font, prev, g);
+        draw_alpha_mask(buf, ((pen + 32) >> 6) + g->left, baseline + g->top,
+                        font_get_bitmap(font, g), g->width, g->width, g->height, color, alpha);
+        pen += g->advance;
+        prev = g;
+    }
+}
+
 void* read_bin(const char* filename, size_t* psize = NULL)
 {
     FILE* file = fopen(filename, "rb");
@@ -539,6 +565,306 @@ int main()
                     viewOk = false;
             }
         check(viewOk, "22: fill_rect clips to clip view");
+    }
+
+    // 23: draw_alpha_mask
+    {
+        const uint32_t W = 20, H = 15, STRIDE = 24;
+        const uint16_t BG = 0x1234, FG = 0xF81F;
+        uint16_t mem[STRIDE * H];
+
+        // Mask of 0/255 values in a pattern, with a stride wider than the
+        // mask and a width that isn't a multiple of 4, so placement and
+        // clipping can be checked exactly
+        const uint32_t MW = 13, MH = 9, MSTRIDE = 17;
+        uint8_t mask[MSTRIDE * MH];
+        for (uint32_t i = 0; i < sizeof(mask); i++)
+            mask[i] = 0x5A;     // junk past the mask width must be ignored
+        for (uint32_t y = 0; y < MH; y++)
+            for (uint32_t x = 0; x < MW; x++)
+                mask[y * MSTRIDE + x] = ((x + 2 * y) % 3 == 0 || y == 4) ? 255 : 0;
+
+        struct { int32_t x, y; } positions[] = {
+            { 3, 2 }, { -5, -4 }, { 12, 10 }, { -12, 3 }, { 19, 14 },
+            { 20, 0 }, { 0, -9 }, { INT32_MIN, INT32_MIN }, { INT32_MAX, INT32_MAX },
+        };
+        bool placeOk = true;
+        for (auto& p : positions)
+        {
+            for (auto& px : mem) px = BG;
+            IMAGE_BUFFER buf;
+            init_image_buffer(&buf, W, H, mem, STRIDE);
+            draw_alpha_mask(&buf, p.x, p.y, mask, MSTRIDE, MW, MH, FG, 255);
+
+            for (uint32_t y = 0; y < H; y++)
+                for (uint32_t x = 0; x < STRIDE; x++)
+                {
+                    int64_t mx = (int64_t)x - p.x, my = (int64_t)y - p.y;
+                    bool in = x < W && mx >= 0 && mx < MW && my >= 0 && my < MH;
+                    uint16_t expect = in && mask[my * MSTRIDE + mx] == 255 ? FG : BG;
+                    if (mem[y * STRIDE + x] != expect)
+                        placeOk = false;
+                }
+        }
+        check(placeOk, "23: alpha mask placement and clipping");
+
+        // Through a clip view
+        {
+            for (auto& px : mem) px = BG;
+            IMAGE_BUFFER buf, view;
+            init_image_buffer(&buf, W, H, mem, STRIDE);
+            clip_image_buffer(&view, &buf, 4, 5, 6, 3);
+            uint8_t solid[40 * 40];
+            memset(solid, 255, sizeof(solid));
+            draw_alpha_mask(&view, -10, -10, solid, 40, 40, 40, FG, 255);
+            bool viewOk = true;
+            for (uint32_t y = 0; y < H; y++)
+                for (uint32_t x = 0; x < STRIDE; x++)
+                {
+                    bool in = x >= 4 && x < 10 && y >= 5 && y < 8;
+                    if (mem[y * STRIDE + x] != (in ? FG : BG))
+                        viewOk = false;
+                }
+            check(viewOk, "23: alpha mask clips to clip view");
+        }
+
+        // Alpha 0 draws nothing
+        {
+            for (auto& px : mem) px = BG;
+            IMAGE_BUFFER buf;
+            init_image_buffer(&buf, W, H, mem, STRIDE);
+            draw_alpha_mask(&buf, 0, 0, mask, MSTRIDE, MW, MH, FG, 0);
+            bool none = true;
+            for (auto& px : mem) if (px != BG) none = false;
+            check(none, "23: alpha 0 draws nothing");
+        }
+
+        // Blending accuracy against an exact blend, for every coverage and
+        // a range of global alphas and colors
+        {
+            const uint16_t colors[] = { 0x0000, 0xFFFF, 0xF800, 0x07E0, 0x001F, 0x1234, 0x8410, 0xA5C3 };
+            const uint8_t alphas[] = { 255, 254, 200, 128, 37, 1 };
+            uint8_t ramp[256];
+            for (int i = 0; i < 256; i++) ramp[i] = (uint8_t)i;
+            uint16_t row[256];
+            double maxErr = 0;
+            bool endsExact = true;
+            for (uint16_t bg : colors)
+                for (uint16_t fg : colors)
+                    for (uint8_t alpha : alphas)
+                    {
+                        for (auto& px : row) px = bg;
+                        IMAGE_BUFFER buf;
+                        init_image_buffer(&buf, 256, 1, row, 0);
+                        draw_alpha_mask(&buf, 0, 0, ramp, 256, 256, 1, fg, alpha);
+                        for (int m = 0; m < 256; m++)
+                        {
+                            double a = m * alpha / (255.0 * 255.0);
+                            const int shifts[] = { 11, 5, 0 };
+                            const int maxes[] = { 31, 63, 31 };
+                            for (int c = 0; c < 3; c++)
+                            {
+                                double b = (bg >> shifts[c]) & maxes[c];
+                                double f = (fg >> shifts[c]) & maxes[c];
+                                double got = (row[m] >> shifts[c]) & maxes[c];
+                                double err = got - (b + (f - b) * a);
+                                if (err < 0) err = -err;
+                                if (err > maxErr) maxErr = err;
+                            }
+                        }
+                        if (row[0] != bg || (alpha == 255 && row[255] != fg))
+                            endsExact = false;
+                    }
+            char msg[100];
+            snprintf(msg, sizeof(msg), "23: alpha mask blend within 1.5 steps of exact (max %.2f)", maxErr);
+            check(maxErr <= 1.5, msg);
+            check(endsExact, "23: coverage 0 and 255 are exact");
+        }
+    }
+
+    // 24: Fonts
+    {
+        size_t size;
+        uint8_t* data = (uint8_t*)read_bin("./artwork/opensans-20.rfnt", &size);
+        const FONT* font = (const FONT*)data;
+        check(check_font(font, size), "24: font is valid");
+
+        // Every codepoint finds its own glyph or nothing, and every glyph is found
+        const FONT_GLYPH* glyphs = (const FONT_GLYPH*)(data + font->glyphsOffset);
+        uint32_t found = 0;
+        bool lookupOk = true;
+        for (uint32_t cp = 0; cp < 0x30000; cp++)
+        {
+            const FONT_GLYPH* g = font_find_glyph(font, cp);
+            if (g == NULL)
+                continue;
+            if (g->codepoint != cp)
+                lookupOk = false;
+            found++;
+        }
+        for (uint32_t i = 0; i < font->glyphCount; i++)
+            if (font_find_glyph(font, glyphs[i].codepoint) != &glyphs[i])
+                lookupOk = false;
+        check(lookupOk && found == font->glyphCount, "24: hash lookup finds every glyph");
+        check(font_find_glyph(font, 0x20AC) != NULL && font_find_glyph(font, 0xE9) != NULL, "24: non-ASCII glyphs found");
+        check(font_find_glyph(font, 0x65E5) == NULL && font_get_glyph(font, 0x65E5) == font_find_glyph(font, '?'),
+              "24: missing glyph falls back to '?'");
+
+        // Kerning (values from the msdf-atlas-gen JSON, in 1/64 px)
+        const FONT_GLYPH* A = font_find_glyph(font, 'A');
+        const FONT_GLYPH* V = font_find_glyph(font, 'V');
+        const FONT_GLYPH* T = font_find_glyph(font, 'T');
+        const FONT_GLYPH* o = font_find_glyph(font, 'o');
+        check(font_get_kerning(font, A, V) == -51 && font_get_kerning(font, T, o) == -89 && font_get_kerning(font, T, T) == 26,
+              "24: kerning pairs");
+        check(font_get_kerning(font, o, o) == 0 && font_get_kerning(font, NULL, A) == 0 && font_get_kerning(font, A, NULL) == 0,
+              "24: unkerned pairs are 0");
+        bool allPairs = true;
+        const FONT_KERNING* pairs = (const FONT_KERNING*)(data + font->kerningOffset);
+        for (uint32_t i = 0; i < font->glyphCount; i++)
+            for (uint32_t k = 0; k < glyphs[i].kerningCount; k++)
+            {
+                const FONT_KERNING* p = &pairs[glyphs[i].kerning + k];
+                if (font_get_kerning(font, &glyphs[i], &glyphs[p->right]) != p->adjust)
+                    allPairs = false;
+            }
+        check(allPairs && font->kerningCount > 0, "24: every kerning pair found");
+
+        // Bitmaps are trimmed: each edge row and column has some coverage
+        bool trimmed = true;
+        for (uint32_t i = 0; i < font->glyphCount; i++)
+        {
+            const FONT_GLYPH* g = &glyphs[i];
+            if (g->width == 0)
+                continue;
+            const uint8_t* bm = font_get_bitmap(font, g);
+            bool top = false, bottom = false, left = false, right = false;
+            for (uint32_t x = 0; x < g->width; x++)
+            {
+                top |= bm[x] != 0;
+                bottom |= bm[(g->height - 1) * g->width + x] != 0;
+            }
+            for (uint32_t y = 0; y < g->height; y++)
+            {
+                left |= bm[y * g->width] != 0;
+                right |= bm[y * g->width + g->width - 1] != 0;
+            }
+            if (!(top && bottom && left && right))
+                trimmed = false;
+        }
+        check(trimmed, "24: glyph bitmaps are trimmed");
+        check(A->top + A->height == 0 && font->ascent > A->height, "24: 'A' sits on the baseline");
+
+        // Damaged fonts are rejected
+        uint8_t* copy = (uint8_t*)malloc(size);
+        auto reset = [&]() { memcpy(copy, data, size); return (FONT*)copy; };
+        check(!check_font(data, size - 1), "24: truncated font rejected");
+        reset()->signature ^= 1;
+        check(!check_font(copy, size), "24: bad signature rejected");
+        reset()->hashBits = 0;
+        check(!check_font(copy, size), "24: zero hashBits rejected");
+        reset()->hashBits = 18;
+        check(!check_font(copy, size), "24: large hashBits rejected");
+        {
+            FONT* f = reset();
+            ((FONT_GLYPH*)(copy + f->glyphsOffset))[10].height = 0xFFFF;
+            check(!check_font(copy, size), "24: glyph bitmap beyond data rejected");
+        }
+        {
+            FONT* f = reset();
+            ((FONT_KERNING*)(copy + f->kerningOffset))[0].right = f->glyphCount;
+            check(!check_font(copy, size), "24: bad kerning glyph rejected");
+        }
+        {
+            FONT* f = reset();
+            uint16_t* table = (uint16_t*)(copy + f->hashOffset);
+            for (uint32_t i = 0; i < (1u << f->hashBits); i++)
+                if (table[i] == FONT_NO_GLYPH) { table[i] = f->glyphCount; break; }
+            check(!check_font(copy, size), "24: bad hash entry rejected");
+        }
+        {
+            // A full table (no empty slots) still can't loop forever
+            FONT* f = reset();
+            uint16_t* table = (uint16_t*)(copy + f->hashOffset);
+            for (uint32_t i = 0; i < (1u << f->hashBits); i++)
+                if (table[i] == FONT_NO_GLYPH) table[i] = 0;
+            check(check_font(copy, size) && font_find_glyph(f, 0x65E5) == NULL, "24: full hash table lookup terminates");
+        }
+
+        // Random damage: anything check_font accepts must be safe to use
+        srand(1234);
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            FONT* f = reset();
+            for (int n = 0; n < 4; n++)
+                copy[rand() % size] = (uint8_t)rand();
+            if (!check_font(copy, size))
+                continue;
+            volatile uint32_t sink = 0;
+            for (uint32_t cp = 0; cp < 0x200; cp++)
+            {
+                const FONT_GLYPH* g = font_get_glyph(f, cp);
+                if (!g) continue;
+                const uint8_t* bm = font_get_bitmap(f, g);
+                for (uint32_t i = 0; i < (uint32_t)g->width * g->height; i++)
+                    sink += bm[i];
+                sink += font_get_kerning(f, g, font_find_glyph(f, 'o'));
+            }
+        }
+        check(true, "24: damaged fonts don't crash");
+        free(copy);
+
+        // Measuring
+        {
+            auto adv = [&](const char* s) { int32_t pen = 0; const FONT_GLYPH* prev = NULL;
+                for (; *s; s++) { const FONT_GLYPH* g = font_get_glyph(font, (uint8_t)*s); pen += font_get_kerning(font, prev, g) + g->advance; prev = g; }
+                return (pen + 32) >> 6; };
+            const FONT_GLYPH* q = font_find_glyph(font, '?');
+            const FONT_GLYPH* e = font_find_glyph(font, 0xE9);
+            const FONT_GLYPH* euro = font_find_glyph(font, 0x20AC);
+
+            check(font_measure_text(font, "", -1) == 0 && font_measure_text(font, "AVATAR", 0) == 0, "24: measure empty");
+            check(font_measure_text(font, "AVATAR Toyota", -1) == adv("AVATAR Toyota"), "24: measure includes kerning");
+            check(font_measure_text(font, "AV", -1) == ((A->advance + V->advance - 51 + 32) >> 6), "24: measure AV");
+            check(font_measure_text(font, "AVATAR", 2) == font_measure_text(font, "AV", -1), "24: measure with length");
+            check(font_measure_text(font, "\xC3\xA9\xE2\x82\xAC", -1) == ((e->advance + euro->advance + 32) >> 6), "24: measure UTF-8");
+            check(font_measure_text(font, "\xE6\x97\xA5", -1) == ((q->advance + 32) >> 6), "24: measure missing char uses default");
+
+            // Invalid UTF-8 measures as U+FFFD, which this font draws as '?'
+            int32_t one = (q->advance + 32) >> 6;
+            check(font_measure_text(font, "\xFF", -1) == one, "24: measure invalid byte");
+            check(font_measure_text(font, "\xE2\x82", -1) == one, "24: measure truncated sequence");
+            check(font_measure_text(font, "\xC0\xAF", -1) == one, "24: measure overlong sequence");
+            check(font_measure_text(font, "\xED\xA0\x80", -1) == one, "24: measure surrogate");
+            check(font_measure_text(font, "\xE2\x82" "A", -1) == ((q->advance + A->advance + 32) >> 6), "24: measure resyncs after bad sequence");
+        }
+
+        // Render some text to look at
+        const uint32_t W = 420, H = 220;
+        uint16_t* mem = (uint16_t*)malloc(W * H * sizeof(uint16_t));
+        IMAGE_BUFFER buf;
+        init_image_buffer(&buf, W, H, mem, W);
+        fill_rect(&buf, 0, 0, W, H, 0xFFFF);
+        fill_rect(&buf, 0, 150, W, H - 150, 0x18E3);
+
+        const uint32_t lh = font->lineHeight;
+        int32_t y = font->ascent + 4;
+        draw_text_test(&buf, font, 8, y, "AVATAR Toyota Wave. (kerned)", 0x0000, true);
+        fill_rect(&buf, 8, y + 2, font_measure_text(font, "AVATAR Toyota Wave. (kerned)", -1), 1, 0x07E0);   y += lh;
+        draw_text_test(&buf, font, 8, y, "AVATAR Toyota Wave. (not kerned)", 0x0000, false); y += lh;
+        draw_text_test(&buf, font, 8, y, "The quick brown fox jumps over the lazy dog", 0x001F, true); y += lh;
+        draw_text_test(&buf, font, 8, y, "Caf\xC3\xA9 \xE2\x82\xAC" "12 21\xC2\xB0 missing:\xE6\x97\xA5", 0xF800, true); y += lh;
+        draw_text_test(&buf, font, 8, y, "Faded text at alpha 96", 0x0000, true, 96);
+
+        // Clipped: a view across the middle of a line, and text on dark
+        IMAGE_BUFFER view;
+        clip_image_buffer(&view, &buf, 60, 160, 200, 14);
+        fill_rect(&view, 0, 0, 200, 14, 0x4208);
+        draw_text_test(&view, font, -20, 14, "Clipped to a view on all sides!", 0xFFE0, true);
+        draw_text_test(&buf, font, 8, 210, "Light on dark 0123456789", 0xFFFF, true);
+        write_bmp("build/font.bmp", mem, W, H);
+        free(mem);
+        free(data);
     }
 
     printf(failures ? "\n%d FAILED\n" : "\nAll checks passed\n", failures);
