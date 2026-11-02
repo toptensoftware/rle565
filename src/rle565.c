@@ -691,13 +691,16 @@ bool check_image_header(const void* image, size_t image_size)
     return true;
 }
 
-bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* palette, uint32_t* out, uint32_t stride, bool premultiplied)
+// Walk every row of an image, bounds checking everything read. Decodes into
+// `out` if it isn't NULL (see decode_image_argb8888), and sets `*opaque` (if
+// not NULL) to whether every pixel is fully opaque.
+static bool walk_image(const void* image, size_t image_size, const PALETTE* palette, uint32_t* out, uint32_t stride, bool premultiplied, bool* opaque)
 {
     const uint8_t* base = (const uint8_t*)image;
     const IMAGE_RLE* header = (const IMAGE_RLE*)image;
 
     // Validate header
-    if (out == nullptr || !check_image_header(image, image_size))
+    if (!check_image_header(image, image_size))
         return false;
 
     // Only read within the image itself (image_size may cover more)
@@ -722,14 +725,18 @@ bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* 
     bool largePalette = (header->base.flags & DRAW_FLAGS_LARGE_PALETTE) != 0;
     const uint32_t* rowOffsets = (const uint32_t*)(base + sizeof(IMAGE_RLE));
 
+    // Rows outside the stored range are transparent
+    bool allOpaque = header->firstRow == 0 && header->rowCount == height;
+
     for (uint32_t y = 0; y < height; y++)
     {
-        uint32_t* row = out + (size_t)y * stride;
+        uint32_t* row = out ? out + (size_t)y * stride : nullptr;
 
         // Rows outside the stored range are fully transparent
         if (y < header->firstRow || y >= header->firstRow + header->rowCount)
         {
-            memset(row, 0, width * sizeof(uint32_t));
+            if (row)
+                memset(row, 0, width * sizeof(uint32_t));
             continue;
         }
 
@@ -760,9 +767,13 @@ bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* 
                     uint32_t pi = largePalette ? safe_read_varlen(&r) : safe_read_byte(&r);
                     if (!r.ok || pi >= palette->count)
                         return false;
-                    row[x] = palette_entry_to_argb8888(palette->colors[pi], premultiplied);
+                    uint32_t c = palette->colors[pi];
+                    if ((c >> 24) != 0xFF)
+                        allOpaque = false;
+                    if (row)
+                        row[x] = palette_entry_to_argb8888(c, premultiplied);
                 }
-                else
+                else if (row)
                 {
                     row[x] = row[x - 1];
                 }
@@ -774,11 +785,27 @@ bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* 
             return false;
 
         // Treat anything not covered by runs as transparent
-        while (x < width)
+        if (x < width)
+            allOpaque = false;
+        while (row && x < width)
             row[x++] = 0;
     }
 
+    if (opaque)
+        *opaque = allOpaque;
     return true;
+}
+
+bool decode_image_argb8888(const void* image, size_t image_size, const PALETTE* palette, uint32_t* out, uint32_t stride, bool premultiplied)
+{
+    if (out == nullptr)
+        return false;
+    return walk_image(image, image_size, palette, out, stride, premultiplied, nullptr);
+}
+
+bool check_image(const void* image, size_t image_size, bool* opaque)
+{
+    return walk_image(image, image_size, nullptr, nullptr, 0, false, opaque);
 }
 
 

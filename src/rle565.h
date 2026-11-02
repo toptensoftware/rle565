@@ -142,6 +142,13 @@ void draw_alpha_mask(IMAGE_BUFFER* buffer, int32_t dest_x, int32_t dest_y,
 // Use before trusting anything read from an untrusted file.
 bool check_image_header(const void* image, size_t image_size);
 
+// Check a whole RLE image without decoding it anywhere: the header (as
+// check_image_header) and every row's run data against the image's own
+// palette, as decode_image_argb8888 would read them. If `opaque` isn't NULL
+// it's set to true when every pixel is fully opaque. Returns false if the
+// image is invalid or has no palette of its own.
+bool check_image(const void* image, size_t image_size, bool* opaque);
+
 // Decoding
 // Decode an entire image to 32-bit 0xAARRGGBB pixels (BGRA byte order in
 // memory, as used by WIC's 32bppBGRA / 32bppPBGRA formats).  Not composited
